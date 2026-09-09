@@ -1,0 +1,11 @@
+pyproject.toml
+src/browser_proxy/__init__.py
+src/browser_proxy/cli.py
+src/browser_proxy/install.py
+src/browser_proxy/native_host.py
+src/browser_proxy/protocol.py
+src/browser_proxy.egg-info/PKG-INFO
+src/browser_proxy.egg-info/SOURCES.txt
+src/browser_proxy.egg-info/dependency_links.txt
+src/browser_proxy.egg-info/entry_points.txt
+src/browser_proxy.egg-info/top_level.txt

@@ -1,0 +1,4 @@
+[console_scripts]
+browser-proxy = browser_proxy.cli:main
+browser-proxy-host = browser_proxy.native_host:main
+browser-proxy-install = browser_proxy.install:main

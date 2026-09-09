@@ -1,0 +1,10 @@
+.venv/
+.browser-proxy/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+dist/
+node_modules/
+npm-debug.log*
+/chrome-devtools-mcp-*.zip
+/chrome-devtools-mcp-*/

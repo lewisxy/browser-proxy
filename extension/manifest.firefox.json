@@ -1,0 +1,31 @@
+{
+  "manifest_version": 2,
+  "name": "Browser Proxy",
+  "description": "Safely relay allowlisted HTTP requests through your browser session.",
+  "version": "0.1.0",
+  "permissions": ["nativeMessaging", "storage", "<all_urls>"],
+  "background": {
+    "scripts": ["policy.js", "background.js"],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_title": "Browser Proxy",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "browser-proxy@local.invalid",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
+    }
+  }
+}

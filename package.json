@@ -1,0 +1,22 @@
+{
+  "name": "browser-proxy-dev",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Development and browser-test tooling for Browser Proxy",
+  "scripts": {
+    "build:extensions": ".venv/bin/python tools/build_extension.py",
+    "lint:firefox": "npx --yes web-ext@10.6.0 lint --source-dir dist/firefox",
+    "test": "npm run test:python && npm run test:policy",
+    "test:python": ".venv/bin/python -m unittest discover -s tests -v",
+    "test:policy": "node --test tests/policy.test.js",
+    "test:chrome": "node tools/chrome_mcp_test.mjs",
+    "verify": "npm run build:extensions && npm run test && npm run lint:firefox"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "chrome-devtools-mcp": "1.8.0"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

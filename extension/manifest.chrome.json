@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Proxy",
+  "description": "Safely relay allowlisted HTTP requests through your browser session.",
+  "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm7XPelzQCwXavG+XNYsZszJdDyRF+xEhV7vOzxZxEOoUKvI4yyNm474LomYgUOLRmOcLPO/idNGv4rTzTrMDAdWDgb364v+Sc/qTYl52yx/wHhktxAQSkySQJITtz/RQROwFdbbaOEp6wuOCa+wuX4dKsS3J/7+S9ijzrm8TNVBCXPGtX3h/KHr3no8h329qWs4AlqREaXBfiRXIC0pwWcj7VOu72KDtAQPUn7Ha/MXNI6mV7D6QadUVSJjjpjz3BCGNFjhope92MvWiHbkE8ZBl5alikZakjwbJfa0GaaJntASmMHiN1YTt9Ucwvpxix5quI9yLPWmSvNsXBVTtdQIDAQAB",
+  "permissions": ["nativeMessaging", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background-loader.js"
+  },
+  "action": {
+    "default_title": "Browser Proxy",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

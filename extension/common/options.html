@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Browser Proxy Settings</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="options-page">
+    <main class="settings-shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">Local bridge / v1</p>
+          <h1>Browser Proxy</h1>
+        </div>
+        <div id="connection" class="status-pill" aria-live="polite">Checking host...</div>
+      </header>
+
+      <section class="intro panel">
+        <p class="lede">Allow local applications to make selected HTTP requests with this browser session.</p>
+        <p>Cookies stay in the browser. Every destination must match a rule below, and cross-origin redirects are blocked.</p>
+      </section>
+
+      <section class="panel rule-panel">
+        <div class="section-heading">
+          <div>
+            <p class="step">01 / Access boundary</p>
+            <h2>Allowed origins</h2>
+          </div>
+          <span id="rule-count" class="counter">0 rules</span>
+        </div>
+        <label for="allowlist">One origin rule per line</label>
+        <textarea id="allowlist" spellcheck="false" placeholder="https://api.example.com&#10;https://*.example.org&#10;http://localhost:*"></textarea>
+        <div class="syntax-grid">
+          <code>https://example.com</code><span>Exact HTTPS origin, default port</span>
+          <code>*://*.example.com</code><span>HTTP or HTTPS, base host and subdomains</span>
+          <code>http://localhost:*</code><span>Any port on local HTTP</span>
+        </div>
+        <p class="warning"><strong>Use narrow rules.</strong> Any process running as your OS user can reach the local relay and invoke state-changing endpoints on allowed origins.</p>
+        <div id="message" class="message" role="status" aria-live="polite"></div>
+        <div class="actions">
+          <button id="save" class="primary" type="button">Save allowlist</button>
+          <button id="reconnect" class="secondary" type="button">Reconnect native host</button>
+        </div>
+      </section>
+
+      <section class="panel facts">
+        <p class="step">02 / Fixed safeguards</p>
+        <div class="fact-grid">
+          <div><strong>Credentials</strong><span>Browser-managed, always included</span></div>
+          <div><strong>Redirects</strong><span>Rejected before following</span></div>
+          <div><strong>Response limit</strong><span>32 MiB</span></div>
+          <div><strong>Request limit</strong><span>16 MiB</span></div>
+        </div>
+      </section>
+    </main>
+    <script src="policy.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>
