@@ -44,6 +44,32 @@ Rules have no path. If `https://api.example.com` is allowed, every path at that 
 
 Avoid `*://*`. Prefer HTTPS and exact hosts and ports. Remove rules when an integration no longer needs them.
 
+### Current Tab Shortcut
+
+Open the toolbar popup while viewing an HTTP or HTTPS page. It displays only the page's origin, not its path, and reports whether any saved rule matches it. If the origin is not allowed, click **Allow this origin** to append an exact scheme, hostname, and port rule.
+
+Browser-internal pages such as `about:`, `chrome:`, extension pages, and local files cannot be proxied and do not offer the add action.
+
+### Import And Export
+
+The settings page can export the currently saved list to `browser-proxy-allowlist.json`. Import validates the complete file, replaces the current list, and saves it atomically. A malformed file does not change existing settings.
+
+The version 1 format is:
+
+```json
+{
+  "format": "browser-proxy-allowlist",
+  "version": 1,
+  "allowlist": [
+    "https://api.example.com",
+    "https://*.example.org",
+    "http://localhost:*"
+  ]
+}
+```
+
+Import files are limited to 1 MiB and 1000 rules. Rules are normalized and duplicates are removed during import and export.
+
 ## CLI Requests
 
 Select Chrome by default or pass `--browser firefox`.

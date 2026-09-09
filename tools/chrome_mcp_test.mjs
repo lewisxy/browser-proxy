@@ -168,6 +168,10 @@ const results = {
   redirectBlocked: false,
   deniedOriginBlocked: false,
   foregroundPageAdded: false,
+  popupDetectedOrigin: false,
+  popupAddedOrigin: false,
+  allowlistImportPassed: false,
+  popupScreenshot: "",
   desktopScreenshot: "",
   mobileScreenshot: "",
 };
@@ -184,7 +188,48 @@ try {
   const listed = await call("list_extensions");
   assert.match(resultText(listed), new RegExp(`id=${expectedExtensionId}.*Enabled`));
 
-  await call("new_page", { url: `${baseUrl}/login`, background: true, timeout: 30000 });
+  const loginPageResult = await call("new_page", {
+    url: `${baseUrl}/login`,
+    background: true,
+    timeout: 30000,
+  });
+  const loginPage = loginPageResult.structuredContent.pages.find((page) => page.url === `${baseUrl}/login`);
+  assert(loginPage, "login page was not listed by MCP");
+  await call("select_page", { pageId: loginPage.id, bringToFront: true });
+  await call("trigger_extension_action", { id: expectedExtensionId });
+  const popupPageResult = await call("new_page", {
+    url: `chrome-extension://${expectedExtensionId}/popup.html`,
+    background: true,
+    timeout: 30000,
+  });
+  const popupPage = (popupPageResult.structuredContent.extensionPages || []).find((page) =>
+    page.url.startsWith(`chrome-extension://${expectedExtensionId}/popup.html`),
+  );
+  assert(popupPage, "extension popup was not listed by MCP");
+  const popupSnapshot = await call("take_snapshot", { pageId: popupPage.id });
+  assert.match(resultText(popupSnapshot), new RegExp(baseUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(resultText(popupSnapshot), /Not allowed/);
+  results.popupDetectedOrigin = true;
+  const popupResult = await call("evaluate_script", {
+    pageId: popupPage.id,
+    function: `async () => {
+      document.querySelector('#allow-origin').click();
+      await new Promise(resolve => setTimeout(resolve, 250));
+      const {allowlist} = await chrome.storage.local.get({allowlist: []});
+      return {
+        status: document.querySelector('#origin-status').textContent,
+        buttonHidden: document.querySelector('#allow-origin').hidden,
+        allowlist
+      };
+    }`,
+  });
+  assert.match(resultText(popupResult), /Allowed by your rules/);
+  assert.match(resultText(popupResult), /"buttonHidden":true/);
+  assert.match(resultText(popupResult), new RegExp(baseUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  results.popupAddedOrigin = true;
+  results.popupScreenshot = path.join(runtimeRoot, "chrome-popup.png");
+  await call("take_screenshot", { pageId: popupPage.id, filePath: results.popupScreenshot });
+
   const optionsPageResult = await call("new_page", {
     url: `chrome-extension://${expectedExtensionId}/options.html`,
     background: true,
@@ -199,14 +244,45 @@ try {
   const configured = await call("evaluate_script", {
     pageId: optionsPage.id,
     function: `async () => {
-      const input = document.querySelector('#allowlist');
-      input.value = ${JSON.stringify(baseUrl)};
-      input.dispatchEvent(new Event('input', {bubbles: true}));
-      document.querySelector('#save').click();
+      const imported = {
+        format: 'browser-proxy-allowlist',
+        version: 1,
+        allowlist: [${JSON.stringify(baseUrl)}, 'https://*.imported.example']
+      };
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([JSON.stringify(imported)], 'allowlist.json', {type: 'application/json'}));
+      const input = document.querySelector('#import-file');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', {bubbles: true}));
       await new Promise(resolve => setTimeout(resolve, 250));
+      const {allowlist} = await chrome.storage.local.get({allowlist: []});
+      const importMessage = document.querySelector('#message').textContent;
+      const originalCreateObjectURL = URL.createObjectURL;
+      const originalRevokeObjectURL = URL.revokeObjectURL;
+      const originalAnchorClick = HTMLAnchorElement.prototype.click;
+      let exportBlob;
+      let downloadName;
+      URL.createObjectURL = blob => {
+        exportBlob = blob;
+        return 'blob:browser-proxy-test';
+      };
+      URL.revokeObjectURL = () => {};
+      HTMLAnchorElement.prototype.click = function () {
+        downloadName = this.download;
+      };
+      document.querySelector('#export').click();
+      await new Promise(resolve => setTimeout(resolve, 250));
+      const exported = JSON.parse(await exportBlob.text());
+      URL.createObjectURL = originalCreateObjectURL;
+      URL.revokeObjectURL = originalRevokeObjectURL;
+      HTMLAnchorElement.prototype.click = originalAnchorClick;
       return {
         title: document.querySelector('h1').textContent,
-        message: document.querySelector('#message').textContent,
+        importMessage,
+        exportMessage: document.querySelector('#message').textContent,
+        downloadName,
+        allowlist,
+        exported,
         mobileRulePresent: Array.from(document.styleSheets).some(sheet =>
           Array.from(sheet.cssRules || []).some(rule => rule.cssText.includes('@media (max-width: 640px)'))
         )
@@ -215,11 +291,19 @@ try {
   });
   const configuredText = resultText(configured);
   assert.match(configuredText, /Browser Proxy/);
-  assert.match(configuredText, /Saved 1 origin rule/);
+  assert.match(configuredText, /Imported and saved 2 origin rules/);
+  assert.match(configuredText, /Exported 2 saved origin rules/);
+  assert.match(configuredText, /browser-proxy-allowlist\.json/);
+  assert.match(configuredText, /browser-proxy-allowlist/);
+  assert.match(configuredText, /"version":1/);
+  assert.match(configuredText, /https:\/\/\*\.imported\.example/);
   assert.match(configuredText, /mobileRulePresent/);
+  results.allowlistImportPassed = true;
 
   const snapshot = await call("take_snapshot", { pageId: optionsPage.id });
   assert.match(resultText(snapshot), /Allowed origins/);
+  assert.match(resultText(snapshot), /Import JSON/);
+  assert.match(resultText(snapshot), /Export JSON/);
   assert.match(resultText(snapshot), /Redirects/);
 
   results.desktopScreenshot = path.join(runtimeRoot, "chrome-options-desktop.png");

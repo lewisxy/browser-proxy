@@ -13,8 +13,15 @@
         <span id="status-dot" class="status-dot"></span>
         <div><strong id="status-title">Checking...</strong><span id="status-detail"></span></div>
       </div>
+      <section class="current-origin" aria-labelledby="current-origin-title">
+        <p class="step">Current tab</p>
+        <strong id="current-origin-title">Checking origin...</strong>
+        <span id="origin-status" class="origin-status" aria-live="polite"></span>
+        <button id="allow-origin" class="secondary full" type="button" hidden>Allow this origin</button>
+      </section>
       <button id="settings" class="primary full" type="button">Open settings</button>
     </main>
+    <script src="policy.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

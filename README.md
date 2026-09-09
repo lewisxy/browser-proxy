@@ -30,6 +30,8 @@ On Windows, use `.venv\Scripts\python.exe` and the corresponding `.exe` commands
 5. Add the narrowest origin rules you need and click **Save allowlist**.
 6. Confirm **Native host connected**.
 
+The toolbar popup also reports whether the active HTTP(S) page is allowed and can add that page's exact origin. Settings can import or export the saved allowlist as a versioned JSON file.
+
 The included manifest key gives the unpacked Chrome extension the stable ID `gkldokmonobnekdblegmdbfjmjeghdjh`.
 
 ### Firefox

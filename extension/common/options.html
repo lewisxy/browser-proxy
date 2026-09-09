@@ -41,7 +41,11 @@
         <div class="actions">
           <button id="save" class="primary" type="button">Save allowlist</button>
           <button id="reconnect" class="secondary" type="button">Reconnect native host</button>
+          <button id="import" class="secondary" type="button">Import JSON</button>
+          <button id="export" class="secondary" type="button">Export JSON</button>
+          <input id="import-file" type="file" accept="application/json,.json" hidden />
         </div>
+        <p class="transfer-note">Import validates the entire file, then replaces and saves the current list. Export uses the currently saved list.</p>
       </section>
 
       <section class="panel facts">
@@ -55,6 +59,7 @@
       </section>
     </main>
     <script src="policy.js"></script>
+    <script src="allowlist-file.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

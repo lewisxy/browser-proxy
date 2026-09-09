@@ -41,6 +41,8 @@ Chrome uses a Manifest V3 service worker. A live native port keeps the service w
 
 No content scripts are installed. No page can call the privileged request handler. Runtime messages exposed to extension pages only report status or request a native-host reconnect.
 
+The toolbar popup receives temporary `activeTab` access when the user opens it. It reads only the active tab's origin, checks it with the same policy engine, and can append an exact origin rule through explicit user interaction. The settings page owns versioned JSON import/export; an import is fully parsed and normalized before replacing extension storage.
+
 ### Policy Engine
 
 `extension/common/policy.js` parses and matches origin rules. It is shared by the background and settings UI and is also tested directly under Node.

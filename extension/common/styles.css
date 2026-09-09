@@ -14,6 +14,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   color: var(--ink);
@@ -203,6 +207,14 @@ textarea:focus {
   gap: 10px;
 }
 
+.transfer-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 button {
   border: 2px solid var(--ink);
   border-radius: 0;
@@ -260,6 +272,32 @@ button:active {
   margin: 26px 0;
   border-block: 1px solid var(--line);
   padding: 18px 0;
+}
+
+.current-origin {
+  margin: 0 0 18px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 18px;
+}
+
+.current-origin > strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.origin-status {
+  display: block;
+  margin: 7px 0 13px;
+  color: var(--signal);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.origin-status.allowed {
+  color: var(--green);
 }
 
 .popup-status div {
