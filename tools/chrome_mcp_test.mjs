@@ -2,9 +2,13 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
 import { createRequire } from "node:module";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -65,6 +69,44 @@ fs.writeFileSync(
 );
 
 let echoRequests = 0;
+const largeResponseBytes = 70 * 1024 * 1024 + 17;
+let resumeLargeResponse;
+
+function largeResponse(response, compressed) {
+  response.setHeader("Content-Type", "application/octet-stream");
+  if (compressed) {
+    response.setHeader("Content-Encoding", "gzip");
+  } else {
+    response.setHeader("Content-Length", largeResponseBytes);
+  }
+  let resume;
+  const gate = new Promise((resolve) => { resume = resolve; });
+  if (!compressed) resumeLargeResponse = resume;
+  response.once("close", resume);
+  const source = Readable.from((async function* () {
+    const chunk = Buffer.alloc(64 * 1024, 0xa5);
+    for (let offset = 0; offset < largeResponseBytes; offset += chunk.length) {
+      yield chunk.subarray(0, Math.min(chunk.length, largeResponseBytes - offset));
+      if (offset === 0 && !compressed) await gate;
+    }
+  })());
+  // pipeline propagates a cancelled download back to the generator.
+  const streams = compressed ? [source, createGzip(), response] : [source, response];
+  void pipeline(...streams).catch(() => {});
+}
+
+async function assertLargeFile(filename) {
+  assert.equal(fs.statSync(filename).size, largeResponseBytes);
+  const actual = createHash("sha256");
+  for await (const chunk of fs.createReadStream(filename)) actual.update(chunk);
+  const expected = createHash("sha256");
+  const block = Buffer.alloc(64 * 1024, 0xa5);
+  for (let offset = 0; offset < largeResponseBytes; offset += block.length) {
+    expected.update(block.subarray(0, Math.min(block.length, largeResponseBytes - offset)));
+  }
+  assert.equal(actual.digest("hex"), expected.digest("hex"));
+}
+
 const server = http.createServer((request, response) => {
   const chunks = [];
   request.on("data", (chunk) => chunks.push(chunk));
@@ -97,11 +139,8 @@ const server = http.createServer((request, response) => {
       );
       return;
     }
-    if (request.url === "/large") {
-      const body = Buffer.alloc(512 * 1024, 0xa5);
-      response.setHeader("Content-Type", "application/octet-stream");
-      response.setHeader("Content-Length", body.length);
-      response.end(body);
+    if (request.url === "/large" || request.url === "/large-gzip") {
+      largeResponse(response, request.url === "/large-gzip");
       return;
     }
     response.statusCode = 404;
@@ -186,6 +225,8 @@ const results = {
   allowlistImportPassed: false,
   nativeReconnectPassed: false,
   largeResponsePassed: false,
+  incrementalOutputPassed: false,
+  compressedStreamingPassed: false,
   popupScreenshot: "",
   desktopScreenshot: "",
   mobileScreenshot: "",
@@ -405,13 +446,39 @@ try {
   assert.equal(echoed.body, '{"hello":"world"}');
   assert(results.cookieNamesSeen.includes("proxy_lax"), "HttpOnly SameSite=Lax cookie was not sent");
 
-  await execFileAsync(cli, ["--browser", "chrome", "-o", largeResponseFile, `${baseUrl}/large`], {
+  const download = execFileAsync(cli, ["--browser", "chrome", "--max-time", "120", "-o", largeResponseFile, `${baseUrl}/large`], {
     encoding: "utf8",
     env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime },
   });
-  assert.equal(fs.statSync(largeResponseFile).size, 512 * 1024);
+  // Handle early rejection while checking that output precedes response completion.
+  let downloadError;
+  const completedDownload = download.catch((error) => { downloadError = error; });
+  try {
+    await waitForFile(largeResponseFile);
+    const deadline = Date.now() + 10000;
+    while (fs.statSync(largeResponseFile).size === 0 && Date.now() < deadline && !downloadError) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    if (downloadError) throw downloadError;
+    assert(fs.statSync(largeResponseFile).size > 0, "CLI buffered the response instead of writing incrementally");
+    assert(fs.statSync(largeResponseFile).size < largeResponseBytes);
+    results.incrementalOutputPassed = true;
+  } finally {
+    resumeLargeResponse?.();
+    await completedDownload;
+  }
+  if (downloadError) throw downloadError;
+  await assertLargeFile(largeResponseFile);
   fs.rmSync(largeResponseFile, { force: true });
   results.largeResponsePassed = true;
+
+  await execFileAsync(cli, ["--browser", "chrome", "--max-time", "120", "-o", largeResponseFile, `${baseUrl}/large-gzip`], {
+    encoding: "utf8",
+    env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime },
+  });
+  await assertLargeFile(largeResponseFile);
+  fs.rmSync(largeResponseFile, { force: true });
+  results.compressedStreamingPassed = true;
 
   try {
     await execFileAsync(cli, ["--browser", "chrome", `http://127.0.0.1:${port}/echo`], {

@@ -34,12 +34,14 @@ function storageGet(defaults) {
 
 function sendNative(message, port = nativePort) {
   if (!port || port !== nativePort) {
-    return;
+    return false;
   }
   try {
     port.postMessage({ protocol: "browser-proxy", version: 1, ...message });
+    return true;
   } catch (error) {
     lastNativeError = error.message;
+    return false;
   }
 }
 
@@ -102,6 +104,9 @@ function validateRequestStart(message) {
   if (!cacheModes.has(cache)) {
     throw new Error("cache is invalid");
   }
+  if (message.stream_response !== undefined && typeof message.stream_response !== "boolean") {
+    throw new Error("stream_response must be a boolean");
+  }
 
   return {
     url: request.url,
@@ -110,6 +115,7 @@ function validateRequestStart(message) {
     timeout_ms: timeoutMs,
     cache,
     bodyBytes,
+    streamResponse: message.stream_response === true,
   };
 }
 
@@ -193,6 +199,89 @@ function sendSuccess(id, response, body, port) {
   sendNative({ type: "response_end", id, chunks: sequence }, port);
 }
 
+function sendAcknowledged(message, sequence, active) {
+  const { controller, port } = active;
+  return new Promise((resolve, reject) => {
+    const aborted = () => {
+      active.ack = null;
+      reject(new Error("Streaming request aborted"));
+    };
+    if (controller.signal.aborted) {
+      aborted();
+      return;
+    }
+    controller.signal.addEventListener("abort", aborted, { once: true });
+    active.ack = {
+      sequence,
+      resolve() {
+        controller.signal.removeEventListener("abort", aborted);
+        active.ack = null;
+        resolve();
+      },
+    };
+    if (!sendNative(message, port)) {
+      controller.abort();
+    }
+  });
+}
+
+async function streamSuccess(id, response, active) {
+  const start = {
+    type: "response_start",
+    id,
+    response: {
+      status: response.status,
+      status_text: response.statusText,
+      url: response.url,
+      headers: Array.from(response.headers.entries()),
+    },
+    body_bytes: null,
+  };
+  // Bound metadata too, including worst-case JSON escaping by the Python relay.
+  if (JSON.stringify(start).length * 6 + 128 > 1024 * 1024) {
+    throw new Error("Response metadata exceeds the streaming frame limit");
+  }
+  let reader;
+  let complete = false;
+  try {
+    // BYOB bounds each read even if the network delivers a large chunk. Fetch
+    // response bodies are byte streams in supported Chrome/Firefox versions.
+    reader = response.body?.getReader({ mode: "byob" });
+    await sendAcknowledged(start, -1, active);
+    let sequence = 0;
+    let total = 0;
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read(new Uint8Array(nativeChunkBytes));
+        if (value?.byteLength) {
+          total += value.byteLength;
+          if (!Number.isSafeInteger(total)) {
+            throw new Error("Response body exceeds the streaming byte-count limit");
+          }
+          await sendAcknowledged({
+            type: "response_chunk", id, sequence, data: encodeBase64(value),
+          }, sequence, active);
+          sequence += 1;
+        }
+        if (done) {
+          break;
+        }
+      }
+    }
+    sendNative({ type: "response_end", id, chunks: sequence, body_bytes: total }, active.port);
+    complete = true;
+  } finally {
+    if (!complete) {
+      if (reader) {
+        await reader.cancel().catch(() => {});
+      } else if (response.body) {
+        await response.body.cancel().catch(() => {});
+      }
+    }
+    reader?.releaseLock();
+  }
+}
+
 async function executeRequest(id, state) {
   const { request } = state;
   const port = state.port;
@@ -236,8 +325,12 @@ async function executeRequest(id, state) {
         );
         return;
       }
-      const responseBody = await readResponseBody(response);
-      sendSuccess(id, response, responseBody, port);
+      if (request.streamResponse) {
+        await streamSuccess(id, response, active);
+      } else {
+        const responseBody = await readResponseBody(response);
+        sendSuccess(id, response, responseBody, port);
+      }
     } catch (error) {
       if (timedOut) {
         sendError(id, "TIMEOUT", `Request exceeded ${request.timeout_ms} ms`, null, port);
@@ -248,6 +341,7 @@ async function executeRequest(id, state) {
       }
     } finally {
       clearTimeout(timer);
+      controller.abort();
     }
   } catch (error) {
     sendError(id, "INVALID_REQUEST", error.message, null, port);
@@ -269,7 +363,7 @@ function removeIncoming(id, state, releaseBuffer = true) {
 }
 
 function handleNativeMessage(message, port) {
-  if (!message || message.protocol !== "browser-proxy" || message.version !== 1) {
+  if (port !== nativePort || !message || message.protocol !== "browser-proxy" || message.version !== 1) {
     return;
   }
   if (message.type === "host_ready") {
@@ -280,6 +374,29 @@ function handleNativeMessage(message, port) {
     return;
   }
   if (typeof message.id !== "string") {
+    return;
+  }
+
+  if (message.type === "request_cancel") {
+    const incoming = incomingRequests.get(message.id);
+    if (incoming?.port === port) {
+      removeIncoming(message.id, incoming);
+    }
+    const active = activeRequests.get(message.id);
+    if (active?.port === port) {
+      active.controller.abort();
+    }
+    return;
+  }
+  if (message.type === "response_ack") {
+    const active = activeRequests.get(message.id);
+    if (active?.port === port) {
+      if (active.ack && message.sequence === active.ack.sequence) {
+        active.ack.resolve();
+      } else {
+        active.controller.abort();
+      }
+    }
     return;
   }
 

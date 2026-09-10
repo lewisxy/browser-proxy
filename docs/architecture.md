@@ -9,7 +9,7 @@ The design separates policy, browser authority, and local transport:
 ```text
 custom app / browser-proxy CLI
         |
-        | owner-only local socket, protocol v1
+        | owner-only local socket, protocol v1 (buffered or streaming)
         v
 Python native host
         |
@@ -34,7 +34,8 @@ allowlisted HTTP(S) origin
 - Reads the allowlist directly from extension-local storage for every request.
 - Validates the URL, method, headers, body size, timeout, and cache mode.
 - Performs background `fetch()` with fixed credential and redirect policies.
-- Streams and bounds the response before chunking it to the host.
+- For streaming downloads, uses a 384 KiB Fetch BYOB reader and waits for each downstream acknowledgement before reading more.
+- For buffered requests, collects a response up to 32 MiB before chunking it to the host.
 - Aborts active requests and discards their responses when their native port disconnects.
 
 Chrome uses a Manifest V3 service worker. A live native port keeps the service worker associated with the host. Firefox uses a Manifest V2 persistent background script because an idle MV3 event page can close its native port and socket, leaving an external process with no way to wake it.
@@ -70,9 +71,11 @@ The socket directory is mode `0700` and the socket is mode `0600` on Unix-like s
 
 The native host is deliberately a relay. It cannot read or update the allowlist and does not make HTTP requests itself.
 
+Streaming responses use a one-message queue per request plus a terminal result slot. The native reader validates and enqueues messages without waiting for local socket I/O. Each local-client thread forwards a message, waits for the client's acknowledgement, then forwards that acknowledgement to the extension. A slow download therefore cannot build an unbounded queue or block the native reader from handling other responses. Client disconnection, invalid acknowledgements, and timeouts cancel the browser request.
+
 ### CLI
 
-`src/browser_proxy/cli.py` translates curl-like arguments into protocol v1. It handles textual, JSON, binary, URL-encoded, and multipart bodies without third-party dependencies. Response bodies remain bytes end to end.
+`src/browser_proxy/cli.py` translates curl-like arguments into protocol v1. It handles textual, JSON, binary, URL-encoded, and multipart bodies without third-party dependencies. Normal output uses `request_stream` and writes/flushes each decoded chunk before acknowledging it. `--response-json` uses the original bounded, buffered `request` mode. Response bodies remain bytes end to end.
 
 ## Credential Handling
 
@@ -115,16 +118,20 @@ Socket permissions stop other OS users, not another process already running as t
 | Item | Limit |
 | --- | ---: |
 | Request body | 16 MiB |
-| Response body | 32 MiB |
+| Buffered response body | 32 MiB |
+| Streamed response byte counter | 2^53 - 1 bytes |
 | Request timeout | 300 seconds |
 | Concurrent extension requests | 16 |
 | Buffered incoming request data | 32 MiB |
 | Request headers | 128 |
 | Header value | 4096 characters |
 | Local framed message | 64 MiB |
+| Streaming response frame / native message accepted by host | 1 MiB |
+| Local acknowledgement frame | 1 KiB |
 | Native chunk payload | 384 KiB before base64 |
+| Unacknowledged streaming data | One chunk per request |
 
-Requests and responses are held in memory. These limits keep each native JSON message below browser limits and cap accidental memory growth.
+Requests and buffered responses are held in memory within their size caps. Streaming responses are read with fixed-size BYOB buffers and relayed incrementally, with no whole-body assembly in the extension, host, or CLI. Flow control bounds in-flight data even with slow consumers. Metadata and error frames remain bounded too. Streaming counts decoded bytes and checks final byte/chunk totals; it does not require or trust Content-Length to determine the total. Browser-managed network/cache buffers are controlled by the browser.
 
 ## Compatibility Limits
 

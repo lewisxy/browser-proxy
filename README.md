@@ -56,6 +56,14 @@ A temporary Firefox extension disappears when Firefox restarts. A permanent dist
 
 Run `.venv/bin/browser-proxy --help` for all options. Notable differences from curl are documented in [the user guide](docs/user-guide.md).
 
+Downloads stream to stdout or `-o FILE` with bounded buffers in the extension, native host, and CLI. Files larger than 32 MiB are supported, including compressed responses and responses without a known length:
+
+```sh
+.venv/bin/browser-proxy --max-time 300 -o archive.zip https://api.example.com/archive.zip
+```
+
+The CLI acknowledges each chunk after writing it, so a slow disk or pipe pauses the download. A failed download returns a nonzero status and may leave a partial output file. Uploads remain limited to 16 MiB; `--response-json` retains its buffered 32 MiB response limit. See [streaming downloads](docs/user-guide.md#streaming-downloads) for details.
+
 ## Security Summary
 
 - The allowlist is empty by default and can only be changed in extension UI.

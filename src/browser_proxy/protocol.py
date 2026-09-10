@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import socket
 import struct
 import sys
 from pathlib import Path
-from typing import BinaryIO, Any
+from typing import BinaryIO, Any, Iterator
 
 
 PROTOCOL_NAME = "browser-proxy"
 PROTOCOL_VERSION = 1
 MAX_LOCAL_MESSAGE_BYTES = 64 * 1024 * 1024
+MAX_STREAM_MESSAGE_BYTES = 1024 * 1024
+MAX_CONTROL_MESSAGE_BYTES = 1024
+STREAM_CHUNK_BYTES = 384 * 1024
+MAX_STREAM_BODY_BYTES = 2**53 - 1
 LOCAL_LENGTH = struct.Struct("!I")
 NATIVE_LENGTH = struct.Struct("@I")
 
@@ -120,3 +126,82 @@ def exchange_local(
             stream.close()
     finally:
         client.close()
+
+
+def stream_local(
+    message: dict[str, Any],
+    socket_path: Path,
+    connect_timeout: float,
+    response_timeout: float,
+) -> Iterator[dict[str, Any]]:
+    """Yield validated stream events, decoding one body chunk at a time.
+
+    Advancing the iterator acknowledges the previous event. Consumers must
+    finish writing that chunk before advancing, and close the iterator on an
+    early exit (including output errors) to cancel the browser request.
+    """
+    request_id = message["id"]
+    started = False
+    sequence = 0
+    total = 0
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(connect_timeout)
+        client.connect(os.fspath(socket_path))
+        client.settimeout(response_timeout)
+        with client.makefile("rwb", buffering=0) as stream:
+            write_local(stream, message)
+            while True:
+                event = read_framed(stream, LOCAL_LENGTH, MAX_STREAM_MESSAGE_BYTES)
+                if (
+                    event.get("protocol") != PROTOCOL_NAME
+                    or event.get("version") != PROTOCOL_VERSION
+                    or (event.get("id") != request_id and (started or event.get("id") != "unknown"))
+                ):
+                    raise ProtocolError("Invalid streaming response envelope")
+                kind = event.get("type")
+                # Older hosts and admission failures use the original error envelope.
+                if kind == "response_error" or (not started and kind == "response" and event.get("ok") is False):
+                    if not isinstance(event.get("error"), dict):
+                        raise ProtocolError("Invalid streaming error")
+                    yield event
+                    return
+                if event.get("id") != request_id:
+                    raise ProtocolError("Streaming response id does not match")
+                if kind == "response_start" and not started:
+                    if event.get("body_bytes", -1) is not None or not isinstance(event.get("response"), dict):
+                        raise ProtocolError("Expected a streaming response_start")
+                    started = True
+                    ack = -1
+                elif kind == "response_chunk" and started:
+                    if type(event.get("sequence")) is not int or event["sequence"] != sequence:
+                        raise ProtocolError("Response chunks are missing or out of order")
+                    data = event.get("data")
+                    if not isinstance(data, str) or len(data) > 4 * (STREAM_CHUNK_BYTES // 3):
+                        raise ProtocolError("Response chunk exceeds the stream limit")
+                    try:
+                        chunk = base64.b64decode(data, validate=True)
+                    except (ValueError, binascii.Error) as error:
+                        raise ProtocolError("Invalid response chunk encoding") from error
+                    if not 0 < len(chunk) <= STREAM_CHUNK_BYTES:
+                        raise ProtocolError("Invalid response chunk size")
+                    total += len(chunk)
+                    if total > MAX_STREAM_BODY_BYTES:
+                        raise ProtocolError("Response exceeds the stream byte-count limit")
+                    event = {**event, "data": chunk}
+                    ack = sequence
+                    sequence += 1
+                elif kind == "response_end" and started:
+                    if (
+                        type(event.get("chunks")) is not int or event["chunks"] != sequence
+                        or type(event.get("body_bytes")) is not int or event["body_bytes"] != total
+                    ):
+                        raise ProtocolError("Response length or chunk count does not match")
+                    yield event
+                    return
+                else:
+                    raise ProtocolError("Unexpected streaming response message")
+                yield event
+                write_framed(stream, {
+                    "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION,
+                    "type": "response_ack", "id": request_id, "sequence": ack,
+                }, LOCAL_LENGTH, MAX_CONTROL_MESSAGE_BYTES)

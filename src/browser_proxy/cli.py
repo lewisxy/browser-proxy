@@ -9,12 +9,13 @@ import mimetypes
 import os
 import sys
 import uuid
+from contextlib import ExitStack, closing
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 from . import __version__
-from .protocol import PROTOCOL_NAME, PROTOCOL_VERSION, default_socket_path, exchange_local
+from .protocol import PROTOCOL_NAME, PROTOCOL_VERSION, ProtocolError, default_socket_path, exchange_local, stream_local
 
 
 def parser() -> argparse.ArgumentParser:
@@ -56,7 +57,7 @@ def parser() -> argparse.ArgumentParser:
         help="Browser channel (default: chrome)",
     )
     result.add_argument("--socket", type=Path, help="Override the local relay socket")
-    result.add_argument("--response-json", action="store_true", help="Print the protocol response as JSON")
+    result.add_argument("--response-json", action="store_true", help="Print a buffered protocol response as JSON (32 MiB body limit)")
     result.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return result
 
@@ -206,6 +207,84 @@ def show_error(arguments: argparse.Namespace, text: str) -> None:
         print(f"browser-proxy: {text}", file=sys.stderr)
 
 
+def write_output(output: BinaryIO, data: bytes) -> None:
+    remaining = memoryview(data)
+    while remaining:
+        written = output.write(remaining)
+        if written is None or written <= 0:
+            raise OSError("Output closed while writing")
+        remaining = remaining[written:]
+    output.flush()
+
+
+def stream_download(arguments: argparse.Namespace, message: dict[str, Any], socket_path: Path) -> int:
+    """Write each response chunk before acknowledging it, including stdout pipes."""
+    started = False
+    fail_status = False
+    status = 0
+    # Write pipes directly: a failed BufferedWriter.flush() can retain bytes and
+    # fail again during interpreter shutdown, replacing exit status 23 with 120.
+    stdout = getattr(sys.stdout.buffer, "raw", sys.stdout.buffer)
+    try:
+        with ExitStack() as outputs, closing(stream_local(
+            message, socket_path, arguments.connect_timeout, arguments.max_time + 7,
+        )) as messages:
+            output = None
+            while True:
+                try:
+                    event = next(messages)
+                except StopIteration:
+                    show_error(arguments, "download ended without response_end; output may be incomplete")
+                    return 1
+                except (EOFError, OSError, ProtocolError, ValueError) as error:
+                    show_error(arguments, f"{'incomplete download' if started else 'relay request failed'}: {error}")
+                    if isinstance(error, TimeoutError):
+                        return 28
+                    return 1 if started or isinstance(error, ProtocolError) else 7
+                kind = event["type"]
+                if kind in {"response_error", "response"}:
+                    error = event["error"]
+                    suffix = "; output may be incomplete" if started else ""
+                    show_error(arguments, f"{error.get('code', 'ERROR')}: {error.get('message', 'Request failed')}{suffix}")
+                    return 28 if error.get("code") in {"TIMEOUT", "BROWSER_TIMEOUT"} else 1
+                if kind == "response_start":
+                    started = True
+                    response = event["response"]
+                    status = int(response.get("status", 0))
+                    header = response_head(response)
+                    fail_status = status >= 400 and (arguments.fail or arguments.fail_with_body)
+                    if arguments.verbose:
+                        for line in header.decode("utf-8").splitlines():
+                            print(f"< {line}", file=sys.stderr)
+                    if arguments.dump_header:
+                        if arguments.dump_header == "-":
+                            write_output(stdout, header)
+                        else:
+                            with Path(arguments.dump_header).expanduser().open("wb") as headers:
+                                headers.write(header)
+                    output = (
+                        outputs.enter_context(Path(arguments.output).expanduser().open("wb"))
+                        if arguments.output and arguments.output != "-" else stdout
+                    )
+                    if arguments.include or arguments.head:
+                        write_output(output, header)
+                    output.flush()
+                    if fail_status and arguments.fail:
+                        show_error(arguments, f"HTTP {status}")
+                        return 22
+                elif kind == "response_chunk":
+                    # Flush stdout too before advancing the iterator and acknowledging.
+                    write_output(output, event["data"])
+                elif kind == "response_end":
+                    if fail_status:
+                        show_error(arguments, f"HTTP {status}")
+                        return 22
+                    return 0
+    except (BrokenPipeError, OSError) as error:
+        show_error(arguments, f"could not write output: {error}")
+        return 23
+
+
 def main() -> int:
     arguments = parser().parse_args()
     if not arguments.url:
@@ -228,7 +307,7 @@ def main() -> int:
     message = {
         "protocol": PROTOCOL_NAME,
         "version": PROTOCOL_VERSION,
-        "type": "request",
+        "type": "request" if arguments.response_json else "request_stream",
         "id": request_id,
         "request": request,
     }
@@ -240,6 +319,9 @@ def main() -> int:
             print(f"> {name}: {value}", file=sys.stderr)
         print("> [Browser cookies are included but never displayed]", file=sys.stderr)
 
+    if not arguments.response_json:
+        return stream_download(arguments, message, socket_path)
+
     try:
         result = exchange_local(
             message,
@@ -247,56 +329,12 @@ def main() -> int:
             arguments.connect_timeout,
             arguments.max_time + 7,
         )
-    except (EOFError, OSError, ValueError) as error:
+    except (EOFError, OSError, ProtocolError, ValueError) as error:
         show_error(arguments, f"cannot connect to {arguments.browser} relay at {socket_path}: {error}")
         return 7
 
-    if arguments.response_json:
-        print(json.dumps(result, indent=2))
-        return 0 if result.get("ok") else 1
-    if not result.get("ok"):
-        error = result.get("error", {})
-        show_error(arguments, f"{error.get('code', 'ERROR')}: {error.get('message', 'Request failed')}")
-        return 28 if error.get("code") in {"TIMEOUT", "BROWSER_TIMEOUT"} else 1
-
-    response = result["response"]
-    try:
-        body = base64.b64decode(response["body"]["data"], validate=True)
-    except (KeyError, ValueError) as error:
-        show_error(arguments, f"invalid response body: {error}")
-        return 1
-    header = response_head(response)
-    status = int(response.get("status", 0))
-
-    if arguments.verbose:
-        for line in header.decode("utf-8").splitlines():
-            print(f"< {line}", file=sys.stderr)
-    fail_status = status >= 400 and (arguments.fail or arguments.fail_with_body)
-    output = b""
-    if arguments.include or arguments.head:
-        output += header
-    if not (status >= 400 and arguments.fail):
-        output += body
-
-    try:
-        if arguments.dump_header:
-            if arguments.dump_header == "-":
-                sys.stdout.buffer.write(header)
-            else:
-                Path(arguments.dump_header).expanduser().write_bytes(header)
-        if arguments.output and arguments.output != "-":
-            Path(arguments.output).expanduser().write_bytes(output)
-        else:
-            sys.stdout.buffer.write(output)
-            sys.stdout.buffer.flush()
-    except (BrokenPipeError, OSError) as error:
-        show_error(arguments, f"could not write output: {error}")
-        return 23
-
-    if fail_status:
-        show_error(arguments, f"HTTP {status}")
-        return 22
-    return 0
+    print(json.dumps(result, indent=2))
+    return 0 if result.get("ok") else 1
 
 
 if __name__ == "__main__":

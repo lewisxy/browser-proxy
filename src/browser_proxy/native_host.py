@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import queue
 import re
+import select
 import signal
 import socket
 import sys
@@ -16,7 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from .protocol import (
-    MAX_LOCAL_MESSAGE_BYTES,
+    LOCAL_LENGTH,
+    MAX_CONTROL_MESSAGE_BYTES,
+    MAX_STREAM_BODY_BYTES,
+    MAX_STREAM_MESSAGE_BYTES,
+    STREAM_CHUNK_BYTES,
     NATIVE_LENGTH,
     PROTOCOL_NAME,
     PROTOCOL_VERSION,
@@ -32,7 +38,7 @@ from .protocol import (
 MAX_NATIVE_MESSAGE_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
-NATIVE_CHUNK_BYTES = 384 * 1024
+NATIVE_CHUNK_BYTES = STREAM_CHUNK_BYTES
 SOCKET_HANDOFF_SECONDS = 2
 FIREFOX_EXTENSION_ID = "browser-proxy@local.invalid"
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -47,6 +53,9 @@ class PendingResponse:
     received_bytes: int = 0
     next_sequence: int = 0
     body: bytearray = field(default_factory=bytearray)
+    streaming: bool = False
+    messages: queue.Queue[dict[str, Any]] = field(default_factory=lambda: queue.Queue(maxsize=1))
+    awaiting_ack: int | None = None
 
 
 class NativeHost:
@@ -67,7 +76,9 @@ class NativeHost:
         with self.native_write_lock:
             write_framed(sys.stdout.buffer, envelope, NATIVE_LENGTH, MAX_NATIVE_MESSAGE_BYTES)
 
-    def send_request(self, request_id: str, request: dict[str, Any], body: bytes) -> None:
+    def send_request(
+        self, request_id: str, request: dict[str, Any], body: bytes, streaming: bool = False,
+    ) -> None:
         metadata = {
             key: request[key]
             for key in ("url", "method", "headers", "timeout_ms", "cache")
@@ -83,6 +94,7 @@ class NativeHost:
                     "id": request_id,
                     "request": metadata,
                     "body_bytes": len(body),
+                    **({"stream_response": True} if streaming else {}),
                 },
                 NATIVE_LENGTH,
                 MAX_NATIVE_MESSAGE_BYTES,
@@ -159,6 +171,10 @@ class NativeHost:
                 pending.event.set()
                 return
 
+            if pending.streaming:
+                self.handle_stream_response(request_id, pending, message)
+                return
+
             if message_type == "response_start":
                 response = message.get("response")
                 expected = message.get("body_bytes")
@@ -217,13 +233,54 @@ class NativeHost:
                     }
                 pending.event.set()
 
+    def handle_stream_response(self, request_id: str, pending: PendingResponse, message: dict[str, Any]) -> None:
+        """Called under pending_lock; never block the shared native reader."""
+        try:
+            if pending.awaiting_ack is not None:
+                raise ValueError("Browser sent data before the previous acknowledgement")
+            kind = message.get("type")
+            if kind == "response_start" and pending.response is None:
+                if message.get("body_bytes", -1) is not None or not isinstance(message.get("response"), dict):
+                    raise ValueError("Browser does not support streaming responses; reload the extension")
+                pending.response = message["response"]
+                pending.awaiting_ack = -1
+            elif kind == "response_chunk" and pending.response is not None:
+                if type(message.get("sequence")) is not int or message["sequence"] != pending.next_sequence:
+                    raise ValueError("Response chunks are missing or out of order")
+                data = message.get("data")
+                if not isinstance(data, str) or len(data) > 4 * (NATIVE_CHUNK_BYTES // 3):
+                    raise ValueError("Response chunk exceeds the stream limit")
+                chunk = base64.b64decode(data, validate=True)
+                if not 0 < len(chunk) <= NATIVE_CHUNK_BYTES:
+                    raise ValueError("Invalid response chunk size")
+                pending.received_bytes += len(chunk)
+                if pending.received_bytes > MAX_STREAM_BODY_BYTES:
+                    raise ValueError("Response exceeds the streaming byte-count limit")
+                pending.awaiting_ack = pending.next_sequence
+                pending.next_sequence += 1
+            elif kind == "response_end" and pending.response is not None:
+                if (
+                    type(message.get("chunks")) is not int or message["chunks"] != pending.next_sequence
+                    or type(message.get("body_bytes")) is not int or message["body_bytes"] != pending.received_bytes
+                ):
+                    raise ValueError("Response length or chunk count does not match")
+                pending.result = message
+                pending.event.set()
+                return
+            else:
+                raise ValueError("Unexpected streaming response message")
+            pending.messages.put_nowait(message)
+        except (ValueError, binascii.Error, queue.Full) as error:
+            pending.result = response_error(request_id, "PROTOCOL_ERROR", str(error))
+            pending.event.set()
+
     def native_reader(self) -> None:
         try:
             while not self.stop_event.is_set():
                 message = read_framed(
                     sys.stdin.buffer,
                     NATIVE_LENGTH,
-                    MAX_LOCAL_MESSAGE_BYTES,
+                    MAX_NATIVE_MESSAGE_BYTES,
                 )
                 self.handle_native_response(message)
         except EOFError:
@@ -239,7 +296,7 @@ class NativeHost:
         if (
             message.get("protocol") != PROTOCOL_NAME
             or message.get("version") != PROTOCOL_VERSION
-            or message.get("type") != "request"
+            or message.get("type") not in ("request", "request_stream")
         ):
             raise ProtocolError("Unsupported local protocol envelope")
         request_id = message.get("id")
@@ -265,15 +322,66 @@ class NativeHost:
             raise ProtocolError("timeout_ms must be an integer between 1 and 300000")
         return request_id, request, body, timeout_ms / 1000 + 5
 
+    def relay_stream(
+        self, connection: socket.socket, stream: Any, request_id: str,
+        pending: PendingResponse, wait_seconds: float,
+    ) -> None:
+        deadline = time.monotonic() + wait_seconds
+        complete = False
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.fail_pending(request_id, "BROWSER_TIMEOUT", "Streaming response exceeded its deadline")
+                if pending.event.is_set():
+                    with self.pending_lock:
+                        event = dict(pending.result or response_error(request_id, "INTERNAL_ERROR", "No result"))
+                    if event.get("type") == "response":
+                        event["type"] = "response_error"
+                        event.pop("ok", None)
+                    connection.settimeout(max(0.1, remaining))
+                    write_framed(stream, event, LOCAL_LENGTH, MAX_STREAM_MESSAGE_BYTES)
+                    complete = event["type"] == "response_end"
+                    return
+                try:
+                    event = pending.messages.get(timeout=min(0.1, max(0.001, remaining)))
+                except queue.Empty:
+                    # Detect a closed client even while Fetch is waiting for headers.
+                    if select.select([connection], [], [], 0)[0]:
+                        if not connection.recv(1, socket.MSG_PEEK):
+                            raise EOFError("Local streaming client disconnected")
+                        raise ProtocolError("Unexpected local stream data")
+                    continue
+                connection.settimeout(max(0.1, deadline - time.monotonic()))
+                write_framed(stream, event, LOCAL_LENGTH, MAX_STREAM_MESSAGE_BYTES)
+                ack = read_framed(stream, LOCAL_LENGTH, MAX_CONTROL_MESSAGE_BYTES)
+                sequence = -1 if event["type"] == "response_start" else event["sequence"]
+                if (
+                    ack.get("protocol") != PROTOCOL_NAME or ack.get("version") != PROTOCOL_VERSION
+                    or ack.get("type") != "response_ack" or ack.get("id") != request_id
+                    or type(ack.get("sequence")) is not int or ack["sequence"] != sequence
+                ):
+                    raise ProtocolError("Invalid streaming response acknowledgement")
+                with self.pending_lock:
+                    if pending.event.is_set():
+                        continue
+                    pending.awaiting_ack = None
+                self.native_message({"type": "response_ack", "id": request_id, "sequence": sequence})
+        finally:
+            if not complete:
+                self.native_message({"type": "request_cancel", "id": request_id})
+
     def handle_client(self, connection: socket.socket) -> None:
         request_id = "unknown"
+        streaming = False
         try:
             connection.settimeout(5)
             stream = connection.makefile("rwb", buffering=0)
             try:
                 message = read_local(stream)
+                streaming = message.get("type") == "request_stream"
                 request_id, request, body, wait_seconds = self.decode_request(message)
-                pending = PendingResponse()
+                pending = PendingResponse(streaming=streaming)
                 with self.pending_lock:
                     if len(self.pending) >= 16:
                         raise ProtocolError("The native host has too many pending requests")
@@ -281,7 +389,10 @@ class NativeHost:
                         raise ProtocolError("A request with this id is already pending")
                     self.pending[request_id] = pending
                 try:
-                    self.send_request(request_id, request, body)
+                    self.send_request(request_id, request, body, streaming)
+                    if streaming:
+                        self.relay_stream(connection, stream, request_id, pending, wait_seconds)
+                        return
                     connection.settimeout(wait_seconds + 1)
                     if not pending.event.wait(wait_seconds):
                         with self.pending_lock:
@@ -302,7 +413,12 @@ class NativeHost:
             print(f"browser-proxy-host: local client failed: {error}", file=sys.stderr)
             try:
                 stream = connection.makefile("wb", buffering=0)
-                write_local(stream, response_error(request_id, "HOST_PROTOCOL_ERROR", str(error)))
+                code = "BROWSER_TIMEOUT" if streaming and isinstance(error, TimeoutError) else "HOST_PROTOCOL_ERROR"
+                error_message = response_error(request_id, code, str(error))
+                if streaming:
+                    error_message["type"] = "response_error"
+                    error_message.pop("ok", None)
+                write_local(stream, error_message)
                 stream.close()
             except Exception:
                 pass

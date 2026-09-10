@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from browser_proxy.cli import build_request, parser
+from browser_proxy.cli import build_request, main, parser
 
 
 class CliRequestTests(unittest.TestCase):
@@ -54,6 +57,15 @@ class CliRequestTests(unittest.TestCase):
         self.assertIn(b'name="label"\r\n\r\ntest', body)
         self.assertIn(b'filename="sample.txt"', body)
         self.assertIn(b"file contents", body)
+
+    def test_response_json_retains_buffered_protocol(self) -> None:
+        result = {"ok": True, "response": {"body": {"encoding": "base64", "data": "YWJj"}}}
+        with patch("sys.argv", ["browser-proxy", "--response-json", "https://example.com/file"]), \
+                patch("browser_proxy.cli.exchange_local", return_value=result) as exchange, \
+                patch("sys.stdout", io.StringIO()) as output:
+            self.assertEqual(main(), 0)
+            self.assertEqual(json.loads(output.getvalue()), result)
+            self.assertEqual(exchange.call_args.args[0]["type"], "request")
 
 
 if __name__ == "__main__":

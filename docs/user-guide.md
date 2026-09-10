@@ -117,7 +117,28 @@ browser-proxy --response-json URL
 browser-proxy -v URL
 ```
 
-`-v` prints only caller-supplied request headers and explicitly notes that browser cookies are hidden. Response bodies are written as bytes. The 32 MiB response limit includes decoded response content.
+`-v` prints only caller-supplied request headers and explicitly notes that browser cookies are hidden. Response bodies are written as bytes and normally streamed as they arrive.
+
+### Streaming Downloads
+
+Normal CLI requests stream responses to stdout or `-o FILE`, including binary files larger than 32 MiB:
+
+```sh
+browser-proxy --max-time 300 -o archive.zip https://api.example.com/archive.zip
+browser-proxy https://api.example.com/export | another-program
+```
+
+The extension reads at most 384 KiB at a time using a Fetch BYOB (bring-your-own-buffer) reader. Each chunk travels through native messaging and the local socket. The CLI writes and flushes it before acknowledging it; the extension waits for that acknowledgement before reading more. The native host keeps a bounded queue per download, and a stalled download does not block its shared response reader. Application-managed response memory is bounded independently of total file size, including when stdout is a slow pipe.
+
+Both known-length and unknown-length responses are supported. The browser handles decompression; streamed byte counts describe the decoded bytes actually written. Streaming uses counters capped at `2^53 - 1` bytes, rather than the buffered mode's 32 MiB body cap. The existing 16-request concurrency limit still applies.
+
+The request timeout defaults to 30 seconds and can be raised to 300 seconds with `--max-time`. It includes browser Fetch and time spent waiting for the download consumer. Slow or stalled output can therefore cause a timeout.
+
+Headers (`-i`, `-D`, `-v`) become available before the body finishes. `--fail` stops on an HTTP error without downloading its body; `--fail-with-body` streams the error body and then returns status 22. Network errors, timeouts, browser disconnection, or invalid stream messages return a nonzero status. File and pipe write errors return status 23 and cancel the browser request. **A failed or interrupted transfer can leave a partial file or partial stdout output**; check the exit status before using the result. Output files are opened with truncation when response headers arrive.
+
+`--response-json` uses the original single-response protocol and buffers the response, with a 32 MiB limit including decompressed content. Existing custom clients using `type: "request"` retain that behavior. Custom clients can opt into streaming with `type: "request_stream"`; see [Protocol](protocol.md#streaming-response-mode).
+
+After upgrading, rebuild/reload the extension and reconnect the native host so both understand streaming. Browser Fetch byte streams with BYOB readers are required; an unsupported browser reports a request error rather than falling back to whole-body buffering. Uploads still use the original 16 MiB bounded request format.
 
 Useful exit statuses follow curl where practical:
 
