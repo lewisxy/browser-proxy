@@ -74,7 +74,7 @@ Do not weaken these properties without explicit user approval and corresponding 
 - Rules authorize origins, not paths, and wildcard matching must preserve hostname boundaries.
 - Every request is checked against the latest stored allowlist.
 - Fetch always uses `credentials: "include"` so credentials remain browser-managed.
-- Redirects remain disabled with `redirect: "error"` to prevent allowlist escapes.
+- Redirects remain unfollowed with `redirect: "manual"`; opaque and 3xx responses must return `REDIRECT_BLOCKED` before reading a body.
 - Clients cannot set browser-controlled headers such as `Cookie`, `Host`, `Content-Length`, or `Sec-*`.
 - Responses do not expose `Set-Cookie` headers.
 - Request, response, framing, concurrency, and timeout limits remain enforced.

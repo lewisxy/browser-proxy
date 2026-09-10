@@ -17,7 +17,7 @@ Python native host
         v
 extension background
         |
-        | Fetch API, credentials=include, redirect=error
+        | Fetch API, credentials=include, redirect=manual (unfollowed)
         v
 allowlisted HTTP(S) origin
 ```
@@ -55,7 +55,7 @@ Rules have this grammar:
 
 An omitted port means the default port for the matched scheme. `*.example.com` matches both `example.com` and its subdomains, but not `notexample.com`. A rule cannot contain a path, query, fragment, or credentials.
 
-The policy checks the URL before Fetch. Fetch uses `redirect: "error"`, so there is no redirect request that could bypass the initial-origin decision.
+The policy checks the URL before Fetch. Fetch uses `redirect: "manual"`; an opaque or 3xx redirect response becomes `REDIRECT_BLOCKED`, and no request is sent to the redirect destination.
 
 ### Native Host
 

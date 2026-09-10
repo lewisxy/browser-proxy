@@ -133,7 +133,7 @@ Useful exit statuses follow curl where practical:
 
 ### Curl Differences
 
-- `-L`/`--location` is intentionally rejected. Redirects cannot be safely followed while guaranteeing per-origin authorization.
+- `-L`/`--location` is intentionally rejected. Redirects return `REDIRECT_BLOCKED` and are not followed because Fetch cannot expose and authorize every destination before contacting it.
 - TLS options, client certificates, proxies, DNS overrides, HTTP version selection, and raw transfer encodings are browser-owned and not configurable.
 - Compression is browser-managed; `--compressed` is accepted as a compatibility no-op.
 - Fetch may combine duplicate headers and transparently decode response content.
@@ -169,7 +169,9 @@ Compare scheme, hostname, and effective port. `localhost` and `127.0.0.1` are di
 
 ### Request Failed
 
-Likely causes include a blocked redirect, DNS/TLS failure, browser cookie policy, a server rejecting extension-origin requests, or an unsupported browser-controlled header. Redirects are not followed even when their destination is also allowed; pass the final URL directly. For example, `https://google.com` redirects to `https://www.google.com/`. Retry with `-v`; browser developer tools can provide network details.
+`REDIRECT_BLOCKED` means the server returned a redirect. Redirects are not followed even when their destination is also allowed; pass the final URL directly. For example, `https://google.com` redirects to `https://www.google.com/`.
+
+`REQUEST_FAILED` covers other Fetch failures, including DNS/TLS failure, browser cookie policy, a server rejecting extension-origin requests, or an unsupported browser-controlled header. Retry with `-v`; browser developer tools can provide network details.
 
 ### Login Cookie Missing
 

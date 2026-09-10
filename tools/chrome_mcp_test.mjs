@@ -430,7 +430,7 @@ try {
       env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime },
     });
   } catch (error) {
-    results.redirectBlocked = String(error.stderr).includes("REQUEST_FAILED");
+    results.redirectBlocked = String(error.stderr).includes("REDIRECT_BLOCKED");
   }
   assert(results.redirectBlocked, "redirect was not rejected");
   assert.equal(echoRequests, echoCountBeforeRedirect, "redirect target received a request");

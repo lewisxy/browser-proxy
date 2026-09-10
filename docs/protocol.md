@@ -112,7 +112,8 @@ Common codes:
 | `INVALID_REQUEST` | extension | URL, method, headers, body, timeout, or chunks were invalid |
 | `BUSY` | extension | Extension concurrency limit reached |
 | `TIMEOUT` | extension | Fetch exceeded `timeout_ms` |
-| `REQUEST_FAILED` | extension | Network, browser policy, CORS-like, or redirect failure |
+| `REDIRECT_BLOCKED` | extension | The server returned a redirect; pass the final URL directly |
+| `REQUEST_FAILED` | extension | Network, browser policy, or CORS-like failure |
 | `RESPONSE_TOO_LARGE` | extension/host | Response exceeded 32 MiB |
 | `HOST_PROTOCOL_ERROR` | host | Local envelope, body, or framing error |
 | `HOST_BUSY` | host | Local client limit reached |

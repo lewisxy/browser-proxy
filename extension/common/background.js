@@ -222,10 +222,20 @@ async function executeRequest(id, state) {
         headers: new Headers(request.headers),
         body: body.length ? body : undefined,
         credentials: "include",
-        redirect: "error",
+        redirect: "manual",
         cache: request.cache,
         signal: controller.signal,
       });
+      if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
+        sendError(
+          id,
+          "REDIRECT_BLOCKED",
+          "The request returned a redirect, which Browser Proxy does not follow; retry with the final URL",
+          null,
+          port,
+        );
+        return;
+      }
       const responseBody = await readResponseBody(response);
       sendSuccess(id, response, responseBody, port);
     } catch (error) {
