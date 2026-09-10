@@ -22,6 +22,9 @@ const mcpServer = path.join(
 );
 const runtimeRoot = path.join(root, ".browser-proxy");
 const profile = path.join(runtimeRoot, "chrome-mcp-profile");
+const chromeRuntime = path.join(runtimeRoot, "chrome-mcp-run");
+const chromeSocket = path.join(chromeRuntime, "chrome.sock");
+const largeResponseFile = path.join(runtimeRoot, "chrome-large-response.bin");
 const extensionPath = path.join(root, "dist", "chrome");
 const venvScripts = path.join(root, ".venv", process.platform === "win32" ? "Scripts" : "bin");
 const chromeDefaults = {
@@ -38,6 +41,8 @@ if (!chromePath || !fs.existsSync(chromePath)) {
 
 fs.mkdirSync(runtimeRoot, { recursive: true });
 fs.rmSync(profile, { recursive: true, force: true });
+fs.rmSync(chromeRuntime, { recursive: true, force: true });
+fs.rmSync(largeResponseFile, { force: true });
 const profileNativeManifest = path.join(
   profile,
   "NativeMessagingHosts",
@@ -92,6 +97,13 @@ const server = http.createServer((request, response) => {
       );
       return;
     }
+    if (request.url === "/large") {
+      const body = Buffer.alloc(512 * 1024, 0xa5);
+      response.setHeader("Content-Type", "application/octet-stream");
+      response.setHeader("Content-Length", body.length);
+      response.end(body);
+      return;
+    }
     response.statusCode = 404;
     response.end("not found");
   });
@@ -125,6 +137,7 @@ const transport = new StdioClientTransport({
   env: {
     ...process.env,
     CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: "true",
+    BROWSER_PROXY_RUNTIME_DIR: chromeRuntime,
   },
   stderr: "pipe",
 });
@@ -171,6 +184,8 @@ const results = {
   popupDetectedOrigin: false,
   popupAddedOrigin: false,
   allowlistImportPassed: false,
+  nativeReconnectPassed: false,
+  largeResponsePassed: false,
   popupScreenshot: "",
   desktopScreenshot: "",
   mobileScreenshot: "",
@@ -328,11 +343,38 @@ try {
     function: "() => ({connected: Boolean(nativePort), error: lastNativeError})",
   });
   try {
-    await waitForFile(path.join(runtimeRoot, "run", "chrome.sock"));
+    await waitForFile(chromeSocket);
   } catch (error) {
     throw new Error(`${error.message}; service worker state: ${resultText(nativeState)}`);
   }
   results.nativeConnected = true;
+
+  const reconnectResult = await call("evaluate_script", {
+    pageId: optionsPage.id,
+    function: `async () => {
+      const button = document.querySelector('#reconnect');
+      button.click();
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        const message = document.querySelector('#message').textContent;
+        if (message !== 'Reconnecting...') {
+          return {
+            message,
+            connection: document.querySelector('#connection').textContent,
+            disabled: button.disabled
+          };
+        }
+      }
+      return {message: 'Timed out in Chrome harness'};
+    }`,
+  });
+  assert.match(resultText(reconnectResult), /Native host reconnected/);
+  assert.match(resultText(reconnectResult), /Native host connected/);
+  assert.match(resultText(reconnectResult), /"disabled":false/);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await waitForFile(chromeSocket);
+  results.nativeReconnectPassed = true;
 
   const cli = path.join(venvScripts, process.platform === "win32" ? "browser-proxy.exe" : "browser-proxy");
   const successful = await execFileAsync(
@@ -346,7 +388,11 @@ try {
       '{"hello":"world"}',
       `${baseUrl}/echo`,
     ],
-    { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+    {
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime },
+    },
   );
   const echoed = JSON.parse(successful.stdout);
   results.cookieNamesSeen = echoed.cookie
@@ -359,9 +405,18 @@ try {
   assert.equal(echoed.body, '{"hello":"world"}');
   assert(results.cookieNamesSeen.includes("proxy_lax"), "HttpOnly SameSite=Lax cookie was not sent");
 
+  await execFileAsync(cli, ["--browser", "chrome", "-o", largeResponseFile, `${baseUrl}/large`], {
+    encoding: "utf8",
+    env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime },
+  });
+  assert.equal(fs.statSync(largeResponseFile).size, 512 * 1024);
+  fs.rmSync(largeResponseFile, { force: true });
+  results.largeResponsePassed = true;
+
   try {
     await execFileAsync(cli, ["--browser", "chrome", `http://127.0.0.1:${port}/echo`], {
       encoding: "utf8",
+      env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime },
     });
   } catch (error) {
     results.deniedOriginBlocked = String(error.stderr).includes("ORIGIN_NOT_ALLOWED");
@@ -370,7 +425,10 @@ try {
 
   const echoCountBeforeRedirect = echoRequests;
   try {
-    await execFileAsync(cli, ["--browser", "chrome", `${baseUrl}/redirect`], { encoding: "utf8" });
+    await execFileAsync(cli, ["--browser", "chrome", `${baseUrl}/redirect`], {
+      encoding: "utf8",
+      env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime },
+    });
   } catch (error) {
     results.redirectBlocked = String(error.stderr).includes("REQUEST_FAILED");
   }
@@ -390,4 +448,5 @@ try {
   await client.close().catch(() => {});
   await new Promise((resolve) => server.close(resolve));
   fs.rmSync(profileNativeManifest, { force: true });
+  fs.rmSync(largeResponseFile, { force: true });
 }

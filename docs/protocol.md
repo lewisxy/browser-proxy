@@ -126,6 +126,8 @@ New error codes may be added without a protocol version change. Clients should d
 
 Native messages use the browser-defined framing: an unsigned 32-bit length in **native byte order**, followed by UTF-8 JSON. The host never writes logs to stdout. The host-to-browser maximum is 1 MiB, so bodies are chunked at 384 KiB before base64 encoding.
 
+After its local socket is bound, listening, and owner-only, the host sends one `host_ready` message. The extension reports the native host as connected only after receiving this message from its current native port. This readiness message has no request ID and is internal to the extension-host lifecycle.
+
 Request sequence:
 
 ```text

@@ -21,6 +21,7 @@ const forbiddenHeaders = new Set([
 const cacheModes = new Set(["default", "no-store", "reload", "no-cache", "force-cache"]);
 
 let nativePort = null;
+let nativeReady = false;
 let reconnectTimer = null;
 let lastNativeError = "Native host has not connected";
 const incomingRequests = new Map();
@@ -258,7 +259,17 @@ function removeIncoming(id, state, releaseBuffer = true) {
 }
 
 function handleNativeMessage(message, port) {
-  if (!message || message.protocol !== "browser-proxy" || message.version !== 1 || typeof message.id !== "string") {
+  if (!message || message.protocol !== "browser-proxy" || message.version !== 1) {
+    return;
+  }
+  if (message.type === "host_ready") {
+    if (port === nativePort) {
+      nativeReady = true;
+      lastNativeError = "";
+    }
+    return;
+  }
+  if (typeof message.id !== "string") {
     return;
   }
 
@@ -354,33 +365,43 @@ function connectNativeHost() {
   try {
     const port = extensionApi.runtime.connectNative(nativeHostName);
     nativePort = port;
-    lastNativeError = "";
+    nativeReady = false;
+    lastNativeError = "Native host is starting";
     port.onMessage.addListener((message) => handleNativeMessage(message, port));
     port.onDisconnect.addListener(() => {
       if (nativePort !== port) {
         return;
       }
       const runtimeError = extensionApi.runtime.lastError;
-      lastNativeError = runtimeError ? runtimeError.message : "Native host disconnected";
+      const portError = port.error;
+      lastNativeError = runtimeError?.message || portError?.message || "Native host disconnected";
       clearPortRequests(port);
       nativePort = null;
+      nativeReady = false;
       scheduleReconnect();
     });
   } catch (error) {
     lastNativeError = error.message;
     nativePort = null;
+    nativeReady = false;
     scheduleReconnect();
   }
 }
 
 extensionApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "reconnect_native") {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     if (nativePort) {
       const port = nativePort;
       nativePort = null;
+      nativeReady = false;
       clearPortRequests(port);
       port.disconnect();
     }
+    lastNativeError = "Native host is reconnecting";
     connectNativeHost();
     sendResponse({ accepted: true });
     return false;
@@ -388,7 +409,8 @@ extensionApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "get_status") {
     storageGet({ allowlist: [] }).then(({ allowlist }) => {
       sendResponse({
-        connected: Boolean(nativePort),
+        connected: Boolean(nativePort && nativeReady),
+        connecting: Boolean((nativePort && !nativeReady) || reconnectTimer),
         error: lastNativeError,
         allowlistCount: allowlist.length,
       });

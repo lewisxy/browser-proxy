@@ -12,7 +12,7 @@ import unittest
 import uuid
 from pathlib import Path
 
-from browser_proxy.native_host import detect_browser
+from browser_proxy.native_host import NativeHost, detect_browser
 from browser_proxy.protocol import (
     MAX_LOCAL_MESSAGE_BYTES,
     NATIVE_LENGTH,
@@ -50,6 +50,12 @@ class NativeHostTests(unittest.TestCase):
                 time.sleep(0.02)
             else:
                 self.fail("native host did not create its socket")
+
+            ready = read_framed(process.stdout, NATIVE_LENGTH, MAX_LOCAL_MESSAGE_BYTES)
+            self.assertEqual(
+                ready,
+                {"protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION, "type": "host_ready"},
+            )
 
             request_id = uuid.uuid4().hex
             request_body = b"request data"
@@ -113,6 +119,36 @@ class NativeHostTests(unittest.TestCase):
             self.assertFalse(client.is_alive())
             self.assertTrue(result["ok"])
             self.assertEqual(base64.b64decode(result["response"]["body"]["data"]), response_body)
+
+            process.stdin.close()
+            process.wait(timeout=2)
+            self.assertEqual(process.returncode, 0)
+            self.assertFalse(socket_path.exists())
+
+    def test_old_host_does_not_unlink_replacement_socket(self) -> None:
+        project_runtime = Path(__file__).resolve().parents[1] / ".browser-proxy"
+        project_runtime.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=project_runtime) as directory:
+            socket_path = Path(directory) / "host.sock"
+            old_host = NativeHost("chrome", socket_path)
+            old_server = old_host.prepare_socket()
+            old_server.close()
+            socket_path.unlink()
+
+            replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(replacement.close)
+            replacement.bind(os.fspath(socket_path))
+            replacement.listen(1)
+
+            old_host.close_server()
+            self.assertTrue(socket_path.exists())
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                client.connect(os.fspath(socket_path))
+            finally:
+                client.close()
+                replacement.close()
+                socket_path.unlink(missing_ok=True)
 
     @staticmethod
     def stop_process(process: subprocess.Popen) -> None:

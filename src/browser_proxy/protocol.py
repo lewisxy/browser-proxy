@@ -83,8 +83,13 @@ def write_framed(
     ).encode("utf-8")
     if not payload or len(payload) > maximum:
         raise ProtocolError(f"Encoded message is {len(payload)} bytes; maximum is {maximum}")
-    stream.write(length_struct.pack(len(payload)))
-    stream.write(payload)
+    frame = memoryview(length_struct.pack(len(payload)) + payload)
+    offset = 0
+    while offset < len(frame):
+        written = stream.write(frame[offset:])
+        if written is None or written <= 0:
+            raise OSError("Peer closed the connection while writing")
+        offset += written
     stream.flush()
 
 

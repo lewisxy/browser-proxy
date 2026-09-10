@@ -6,6 +6,7 @@ const countOutput = document.querySelector("#rule-count");
 const messageOutput = document.querySelector("#message");
 const connectionOutput = document.querySelector("#connection");
 const importFileInput = document.querySelector("#import-file");
+const reconnectButton = document.querySelector("#reconnect");
 
 function rulesFromInput() {
   return allowlistInput.value
@@ -27,13 +28,19 @@ function showMessage(text, kind) {
 async function updateStatus() {
   try {
     const status = await optionsApi.runtime.sendMessage({ type: "get_status" });
-    connectionOutput.textContent = status.connected ? "Native host connected" : "Native host offline";
+    connectionOutput.textContent = status.connected
+      ? "Native host connected"
+      : status.connecting
+        ? "Native host connecting"
+        : "Native host offline";
     connectionOutput.classList.toggle("connected", status.connected);
     connectionOutput.title = status.error || "";
+    return status;
   } catch (error) {
     connectionOutput.textContent = "Background unavailable";
     connectionOutput.classList.remove("connected");
     connectionOutput.title = error.message;
+    return { connected: false, connecting: false, error: error.message };
   }
 }
 
@@ -102,13 +109,29 @@ document.querySelector("#save").addEventListener("click", save);
 document.querySelector("#import").addEventListener("click", () => importFileInput.click());
 document.querySelector("#export").addEventListener("click", exportAllowlist);
 importFileInput.addEventListener("change", importAllowlist);
-document.querySelector("#reconnect").addEventListener("click", async () => {
+reconnectButton.addEventListener("click", async () => {
+  if (reconnectButton.disabled) {
+    return;
+  }
+  reconnectButton.disabled = true;
   showMessage("Reconnecting...", "");
   try {
     await optionsApi.runtime.sendMessage({ type: "reconnect_native" });
-    setTimeout(updateStatus, 500);
+    const deadline = Date.now() + 15000;
+    let status;
+    while (Date.now() < deadline) {
+      status = await updateStatus();
+      if (status.connected) {
+        showMessage("Native host reconnected.", "success");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(`Timed out waiting for native host${status?.error ? `: ${status.error}` : ""}`);
   } catch (error) {
-    showMessage(error.message, "error");
+    showMessage(`Reconnect failed: ${error.message}`, "error");
+  } finally {
+    reconnectButton.disabled = false;
   }
 });
 allowlistInput.addEventListener("input", updateCount);

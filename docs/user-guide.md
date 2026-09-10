@@ -169,7 +169,7 @@ Compare scheme, hostname, and effective port. `localhost` and `127.0.0.1` are di
 
 ### Request Failed
 
-Likely causes include a blocked redirect, DNS/TLS failure, browser cookie policy, a server rejecting extension-origin requests, or an unsupported browser-controlled header. Retry with `-v`; browser developer tools can provide network details.
+Likely causes include a blocked redirect, DNS/TLS failure, browser cookie policy, a server rejecting extension-origin requests, or an unsupported browser-controlled header. Redirects are not followed even when their destination is also allowed; pass the final URL directly. For example, `https://google.com` redirects to `https://www.google.com/`. Retry with `-v`; browser developer tools can provide network details.
 
 ### Login Cookie Missing
 

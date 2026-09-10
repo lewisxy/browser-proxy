@@ -53,7 +53,7 @@ Run the standard verification after code changes:
 npm run verify
 ```
 
-This rebuilds both extensions, runs Python tests, runs JavaScript policy/import-export tests, and lints the Firefox extension.
+This rebuilds both extensions, runs Python tests, runs JavaScript extension tests, and lints the Firefox extension.
 
 For changes affecting extension behavior, native messaging, cookies, allowlists, or the Chrome harness, also run:
 

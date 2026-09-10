@@ -19,6 +19,17 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             read_local(stream)
 
+    def test_write_local_completes_partial_writes(self) -> None:
+        class PartialWriteStream(io.BytesIO):
+            def write(self, data: bytes) -> int:
+                return super().write(data[:17])
+
+        stream = PartialWriteStream()
+        message = {"protocol": "browser-proxy", "body": "x" * 4096}
+        write_local(stream, message)
+        stream.seek(0)
+        self.assertEqual(read_local(stream), message)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,11 @@ async function loadStatus() {
   const dot = document.querySelector("#status-dot");
   try {
     const status = await popupApi.runtime.sendMessage({ type: "get_status" });
-    title.textContent = status.connected ? "Native host connected" : "Native host offline";
+    title.textContent = status.connected
+      ? "Native host connected"
+      : status.connecting
+        ? "Native host connecting"
+        : "Native host offline";
     detail.textContent = `${status.allowlistCount} allowed origin ${status.allowlistCount === 1 ? "rule" : "rules"}`;
     dot.classList.toggle("connected", status.connected);
   } catch (error) {

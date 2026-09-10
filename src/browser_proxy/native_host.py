@@ -10,6 +10,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ MAX_NATIVE_MESSAGE_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 NATIVE_CHUNK_BYTES = 384 * 1024
+SOCKET_HANDOFF_SECONDS = 2
 FIREFOX_EXTENSION_ID = "browser-proxy@local.invalid"
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -54,8 +56,10 @@ class NativeHost:
         self.stop_event = threading.Event()
         self.native_write_lock = threading.Lock()
         self.pending_lock = threading.Lock()
+        self.server_lock = threading.Lock()
         self.pending: dict[str, PendingResponse] = {}
         self.server: socket.socket | None = None
+        self.socket_identity: tuple[int, int] | None = None
         self.client_slots = threading.BoundedSemaphore(16)
 
     def native_message(self, message: dict[str, Any]) -> None:
@@ -229,11 +233,7 @@ class NativeHost:
         finally:
             self.stop_event.set()
             self.fail_all("Browser closed the native messaging connection")
-            if self.server:
-                try:
-                    self.server.close()
-                except OSError:
-                    pass
+            self.close_server()
 
     def decode_request(self, message: dict[str, Any]) -> tuple[str, dict[str, Any], bytes, float]:
         if (
@@ -299,6 +299,7 @@ class NativeHost:
             finally:
                 stream.close()
         except Exception as error:
+            print(f"browser-proxy-host: local client failed: {error}", file=sys.stderr)
             try:
                 stream = connection.makefile("wb", buffering=0)
                 write_local(stream, response_error(request_id, "HOST_PROTOCOL_ERROR", str(error)))
@@ -327,31 +328,71 @@ class NativeHost:
         except OSError:
             pass
 
-        if self.socket_path.exists():
+        handoff_deadline = time.monotonic() + SOCKET_HANDOFF_SECONDS
+        while self.socket_path.exists():
+            existing_stat = os.stat(self.socket_path, follow_symlinks=False)
+            existing_identity = (existing_stat.st_dev, existing_stat.st_ino)
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 probe.settimeout(0.2)
                 probe.connect(os.fspath(self.socket_path))
             except OSError:
-                self.socket_path.unlink(missing_ok=True)
+                try:
+                    current_stat = os.stat(self.socket_path, follow_symlinks=False)
+                except FileNotFoundError:
+                    break
+                if (current_stat.st_dev, current_stat.st_ino) == existing_identity:
+                    self.socket_path.unlink(missing_ok=True)
+                    break
             else:
-                raise RuntimeError(f"Another {self.browser} native host already owns {self.socket_path}")
+                if time.monotonic() >= handoff_deadline:
+                    raise RuntimeError(f"Another {self.browser} native host already owns {self.socket_path}")
+                time.sleep(0.05)
             finally:
                 probe.close()
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(os.fspath(self.socket_path))
         try:
-            self.socket_path.chmod(0o600)
-        except OSError:
-            pass
-        server.listen(16)
-        server.settimeout(0.5)
-        self.server = server
+            server.bind(os.fspath(self.socket_path))
+            socket_stat = os.stat(self.socket_path, follow_symlinks=False)
+            socket_identity = (socket_stat.st_dev, socket_stat.st_ino)
+            try:
+                self.socket_path.chmod(0o600)
+            except OSError:
+                pass
+            server.listen(16)
+            server.settimeout(0.5)
+        except Exception:
+            server.close()
+            self.socket_path.unlink(missing_ok=True)
+            raise
+        with self.server_lock:
+            self.server = server
+            self.socket_identity = socket_identity
         return server
+
+    def close_server(self) -> None:
+        with self.server_lock:
+            server = self.server
+            socket_identity = self.socket_identity
+            self.server = None
+            self.socket_identity = None
+            if socket_identity is not None:
+                try:
+                    current_stat = os.stat(self.socket_path, follow_symlinks=False)
+                    if (current_stat.st_dev, current_stat.st_ino) == socket_identity:
+                        self.socket_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if server is not None:
+                try:
+                    server.close()
+                except OSError:
+                    pass
 
     def run(self) -> int:
         server = self.prepare_socket()
+        self.native_message({"type": "host_ready"})
         reader = threading.Thread(target=self.native_reader, name="native-reader", daemon=True)
         reader.start()
         try:
@@ -378,8 +419,7 @@ class NativeHost:
                 ).start()
         finally:
             self.stop_event.set()
-            server.close()
-            self.socket_path.unlink(missing_ok=True)
+            self.close_server()
         return 0
 
 
@@ -427,8 +467,7 @@ def main() -> int:
 
         def stop(_signum: int, _frame: Any) -> None:
             host.stop_event.set()
-            if host.server:
-                host.server.close()
+            host.close_server()
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)

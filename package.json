@@ -6,9 +6,9 @@
   "scripts": {
     "build:extensions": ".venv/bin/python tools/build_extension.py",
     "lint:firefox": "npx --yes web-ext@10.6.0 lint --source-dir dist/firefox",
-    "test": "npm run test:python && npm run test:policy",
+    "test": "npm run test:python && npm run test:javascript",
     "test:python": ".venv/bin/python -m unittest discover -s tests -v",
-    "test:policy": "node --test tests/*.test.js",
+    "test:javascript": "node --test tests/*.test.js",
     "test:chrome": "node tools/chrome_mcp_test.mjs",
     "verify": "npm run build:extensions && npm run test && npm run lint:firefox"
   },
