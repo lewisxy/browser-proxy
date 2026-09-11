@@ -18,7 +18,7 @@
 
       <section class="intro panel">
         <p class="lede">Allow local applications to make selected HTTP requests with this browser session.</p>
-        <p>Cookies stay in the browser. Every destination must match a rule below, and cross-origin redirects are blocked.</p>
+        <p>Cookies stay in the browser. Every destination, including each redirect hop, must match a rule below.</p>
       </section>
 
       <section class="panel rule-panel">
@@ -48,11 +48,27 @@
         <p class="transfer-note">Import validates the entire file, then replaces and saves the current list. Export uses the currently saved list.</p>
       </section>
 
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <p class="step">02 / Request behavior</p>
+            <h2>Redirects</h2>
+          </div>
+        </div>
+        <label class="checkbox-label" for="redirects-enabled">
+          <input id="redirects-enabled" type="checkbox" aria-describedby="redirects-help" />
+          Enable redirects
+        </label>
+        <p id="redirects-help">Off by default. When enabled, applications may follow up to 20 redirects using <code>-L / --location</code>. Every hop is checked against the latest allowed origins. Changes save immediately.</p>
+        <p>Without <code>-L</code>, applications receive the redirect status and headers without following it. Redirect bodies are unavailable.</p>
+        <div id="redirects-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
       <section class="panel facts">
-        <p class="step">02 / Fixed safeguards</p>
+        <p class="step">03 / Fixed safeguards</p>
         <div class="fact-grid">
           <div><strong>Credentials</strong><span>Browser-managed, always included</span></div>
-          <div><strong>Redirects</strong><span>Rejected before following</span></div>
+          <div><strong>Redirect destinations</strong><span>Authorized before each hop</span></div>
           <div><strong>Response limit</strong><span>32 MiB</span></div>
           <div><strong>Request limit</strong><span>16 MiB</span></div>
         </div>

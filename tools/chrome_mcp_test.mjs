@@ -69,6 +69,15 @@ fs.writeFileSync(
 );
 
 let echoRequests = 0;
+let deniedRedirectRequests = 0;
+const redirectGates = new Map();
+const redirectHits = new Map();
+const deniedServer = http.createServer((_request, response) => {
+  deniedRedirectRequests += 1;
+  response.writeHead(302, { Location: `${baseUrl}/echo` });
+  response.end();
+});
+await new Promise(resolve => deniedServer.listen(0, "127.0.0.1", resolve));
 const largeResponseBytes = 70 * 1024 * 1024 + 17;
 let resumeLargeResponse;
 
@@ -111,6 +120,22 @@ const server = http.createServer((request, response) => {
   const chunks = [];
   request.on("data", (chunk) => chunks.push(chunk));
   request.on("end", () => {
+    const parsed = new URL(request.url, "http://localhost");
+    if (["/r", "/r-cache", "/r-gated"].includes(parsed.pathname)) {
+      redirectHits.set(request.url, (redirectHits.get(request.url) || 0) + 1);
+      const send = () => {
+        response.setHeader("Location", parsed.searchParams.get("to") || "/echo");
+        response.setHeader("X-Redirect-Test", request.headers["x-test"] || "redirect");
+        response.setHeader("Vary", "X-Test");
+        if (parsed.pathname === "/r-cache") response.setHeader("Cache-Control", "max-age=3600");
+        if (parsed.searchParams.has("cookie")) response.setHeader("Set-Cookie", "redirect_cookie=hop-secret; HttpOnly; SameSite=Lax; Path=/");
+        response.statusCode = Number(parsed.searchParams.get("status") || 302);
+        response.end("redirecting");
+      };
+      if (parsed.pathname === "/r-gated") redirectGates.set(parsed.searchParams.get("gate"), send);
+      else send();
+      return;
+    }
     if (request.url === "/login") {
       response.setHeader("Set-Cookie", [
         "proxy_lax=browser-secret; HttpOnly; SameSite=Lax; Path=/",
@@ -123,6 +148,9 @@ const server = http.createServer((request, response) => {
     if (request.url === "/redirect") {
       response.statusCode = 302;
       response.setHeader("Location", `http://127.0.0.1:${server.address().port}/echo`);
+      response.setHeader("Content-Type", "text/plain");
+      response.setHeader("Content-Length", Buffer.byteLength("redirecting"));
+      response.setHeader("Set-Cookie", "unfollowed_cookie=hidden-secret; HttpOnly; SameSite=Lax; Path=/");
       response.end("redirecting");
       return;
     }
@@ -135,6 +163,9 @@ const server = http.createServer((request, response) => {
           cookie: request.headers.cookie || "",
           testHeader: request.headers["x-test"] || "",
           body: Buffer.concat(chunks).toString("utf8"),
+          bodyBase64: Buffer.concat(chunks).toString("base64"),
+          authorization: request.headers.authorization || "",
+          contentType: request.headers["content-type"] || "",
         }),
       );
       return;
@@ -218,6 +249,12 @@ const results = {
   cookieNamesSeen: [],
   requestMethod: "",
   redirectBlocked: false,
+  unfollowedRedirectPassed: false,
+  liveHeadRedirectStatus: null,
+  redirectsPassed: false,
+  cachedRedirectPassed: false,
+  redirectRevocationPassed: false,
+  hstsRedirectPassed: false,
   deniedOriginBlocked: false,
   foregroundPageAdded: false,
   popupDetectedOrigin: false,
@@ -491,16 +528,231 @@ try {
   assert(results.deniedOriginBlocked, "a non-allowlisted origin was not blocked");
 
   const echoCountBeforeRedirect = echoRequests;
-  try {
-    await execFileAsync(cli, ["--browser", "chrome", `${baseUrl}/redirect`], {
-      encoding: "utf8",
-      env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime },
+  const cliOptions = { encoding: "utf8", env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime } };
+  const invoke = (...args) => execFileAsync(cli, ["--browser", "chrome", ...args], cliOptions);
+  const rejectRedirect = async (code, ...args) => {
+    await assert.rejects(invoke(...args), error => {
+      assert.match(String(error.stderr), new RegExp(code));
+      return true;
     });
-  } catch (error) {
-    results.redirectBlocked = String(error.stderr).includes("REDIRECT_BLOCKED");
+  };
+  const route = (to = "/echo", status = 302, pathname = "/r", extra = {}) =>
+    `${baseUrl}${pathname}?${new URLSearchParams({ to, status: String(status), ...extra })}`;
+  const unfollowed = JSON.parse((await invoke("--response-json", `${baseUrl}/redirect`)).stdout);
+  assert.equal(unfollowed.ok, true);
+  assert.equal(unfollowed.response.status, 302);
+  assert.equal(unfollowed.response.status_text, "Found");
+  assert.equal(unfollowed.response.url, `${baseUrl}/redirect`);
+  assert.equal(unfollowed.response.body_unavailable, true);
+  assert.equal(unfollowed.response.body.data, "");
+  const unfollowedHeaders = Object.fromEntries(unfollowed.response.headers);
+  assert.equal(unfollowedHeaders.location, `http://127.0.0.1:${port}/echo`);
+  assert.equal(unfollowedHeaders["content-length"], String(Buffer.byteLength("redirecting")));
+  assert.equal(unfollowedHeaders["content-type"], "text/plain");
+  assert(!JSON.stringify(unfollowed).includes("hidden-secret"));
+  assert(!JSON.stringify(unfollowed).includes("set-cookie"));
+  assert(!JSON.stringify(unfollowed).includes("browser-proxy-"));
+  for (const flags of [[], ["-i"], ["-I"], ["-f"], ["-s"], ["-s", "-S"]]) {
+    const result = await invoke(...flags, `${baseUrl}/redirect`);
+    if (flags.includes("-i") || flags.includes("-I")) {
+      assert.match(result.stdout, /^HTTP\/1\.1 302 Found\r\n/);
+      assert.match(result.stdout, /\r\nlocation: http:\/\/127\.0\.0\.1:/);
+      assert(result.stdout.endsWith("\r\n\r\n"));
+      assert(!result.stdout.includes("redirecting"));
+    } else assert.equal(result.stdout, "");
+    assert.equal(result.stderr.includes("response body is unavailable"), !flags.includes("-I") && !flags.includes("-s"));
   }
-  assert(results.redirectBlocked, "redirect was not rejected");
-  assert.equal(echoRequests, echoCountBeforeRedirect, "redirect target received a request");
+  const redirectHeaderFile = path.join(runtimeRoot, "unfollowed-headers.txt");
+  const redirectBodyFile = path.join(runtimeRoot, "unfollowed-body.bin");
+  try {
+    await invoke("-D", redirectHeaderFile, "-o", redirectBodyFile, `${baseUrl}/redirect`);
+    assert.match(fs.readFileSync(redirectHeaderFile, "utf8"), /^HTTP\/1\.1 302 Found/);
+    assert.equal(fs.statSync(redirectBodyFile).size, 0);
+  } finally {
+    fs.rmSync(redirectHeaderFile, { force: true });
+    fs.rmSync(redirectBodyFile, { force: true });
+  }
+  for (const status of [301, 302, 303, 307, 308]) {
+    const result = JSON.parse((await invoke("--response-json", "--json", '{"unfollowed":true}', route("/echo", status))).stdout);
+    assert.equal(result.response.status, status);
+    assert.equal(result.response.body_unavailable, true);
+    assert.equal(result.response.body.data, "");
+    assert.equal(Object.fromEntries(result.response.headers).location, "/echo");
+  }
+  assert.equal(echoRequests, echoCountBeforeRedirect, "an unfollowed redirect contacted its target");
+  results.unfollowedRedirectPassed = true;
+  const setRedirects = async enabled => {
+    const saved = await call("evaluate_script", {
+      pageId: optionsPage.id,
+      function: `async () => {
+        const input = document.querySelector('#redirects-enabled');
+        if (input.checked !== ${enabled}) input.click();
+        for (let i = 0; i < 100; i++) {
+          const settings = await chrome.storage.local.get({redirectsEnabled: false});
+          if (settings.redirectsEnabled === ${enabled} && !input.disabled) return {saved: true};
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        return {saved: false};
+      }`,
+    });
+    assert.match(resultText(saved), /"saved":true/);
+  };
+  const setRules = async rules => {
+    const saved = await call("evaluate_script", {
+      pageId: optionsPage.id,
+      function: `async () => {
+        const rules = ${JSON.stringify(rules)};
+        document.querySelector('#allowlist').value = rules.join('\\n');
+        document.querySelector('#save').click();
+        for (let i = 0; i < 100; i++) {
+          const {allowlist} = await chrome.storage.local.get({allowlist: []});
+          if (JSON.stringify(allowlist) === JSON.stringify(rules)) return {saved: true};
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        return {saved: false};
+      }`,
+    });
+    assert.match(resultText(saved), /"saved":true/);
+  };
+  const waitForGate = async name => {
+    const deadline = Date.now() + 10000;
+    while (!redirectGates.has(name) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert(redirectGates.has(name), `redirect gate ${name} was not reached`);
+  };
+
+  // The setting starts disabled, even when a local caller explicitly uses -L.
+  await rejectRedirect("REDIRECT_BLOCKED", "-L", route());
+  results.redirectBlocked = true;
+  assert.equal(echoRequests, echoCountBeforeRedirect);
+  await setRedirects(true);
+  assert.equal(JSON.parse((await invoke("--response-json", route())).stdout).response.body_unavailable, true);
+  await rejectRedirect("REDIRECT_NOT_ALLOWED", "-L", `${baseUrl}/redirect`);
+  assert.equal(echoRequests, echoCountBeforeRedirect);
+
+  const otherOrigin = `http://127.0.0.1:${port}`;
+  const redirectRules = [baseUrl, otherOrigin, "http://github.com"];
+  await setRules(redirectRules);
+  if (process.env.BROWSER_PROXY_LIVE_REDIRECT_URL) {
+    const liveUrl = new URL(process.env.BROWSER_PROXY_LIVE_REDIRECT_URL);
+    assert(["http:", "https:"].includes(liveUrl.protocol), "live redirect probe requires HTTP(S)");
+    await setRules([...new Set([...redirectRules, liveUrl.origin])]);
+    const live = JSON.parse((await invoke("-I", "--response-json", liveUrl.href)).stdout);
+    assert.equal(live.ok, true);
+    assert([301, 302, 303, 307, 308].includes(live.response.status));
+    assert.equal(live.response.body_unavailable, true);
+    assert.equal(live.response.body.data, "");
+    assert(Object.fromEntries(live.response.headers).location);
+    assert.equal(live.response.redirected, undefined);
+    results.liveHeadRedirectStatus = live.response.status;
+    await setRules(redirectRules);
+  }
+  const multiHop = route(route(`${otherOrigin}/echo`, 307));
+  const final = JSON.parse((await invoke("-L", "--response-json", multiHop)).stdout);
+  assert.equal(final.response.url, `${otherOrigin}/echo`);
+  assert.equal(final.response.redirects.length, 2);
+  assert(final.response.redirected);
+  assert.equal(final.response.body_unavailable, undefined);
+  assert(!JSON.stringify(final).includes("browser-proxy-"), "internal fragment leaked into response metadata");
+
+  const withCookie = JSON.parse((await invoke("-L", route("/echo", 302, "/r", { cookie: "1" }))).stdout);
+  assert.match(withCookie.cookie, /redirect_cookie=hop-secret/);
+  const chainHeaders = final.response.headers.map(([name]) => name.toLowerCase());
+  assert(!chainHeaders.includes("set-cookie"));
+
+  for (const status of [301, 302, 303, 307, 308]) {
+    const result = JSON.parse((await invoke("-L", "-H", "Authorization: Bearer test-secret", "--json", '{"hello":"redirect"}', route(`${otherOrigin}/echo`, status))).stdout);
+    assert.equal(result.method, status <= 303 ? "GET" : "POST");
+    assert.equal(result.body, status <= 303 ? "" : '{"hello":"redirect"}');
+    assert.equal(result.contentType, status <= 303 ? "" : "application/json");
+    assert.equal(result.authorization, "", "Authorization crossed an origin boundary");
+  }
+  const binarySource = path.join(runtimeRoot, "redirect-upload.bin");
+  try {
+    fs.writeFileSync(binarySource, Buffer.from([0, 255, 128, 1]));
+    const result = JSON.parse((await invoke("-L", "--data-binary", `@${binarySource}`, route("/echo", 308))).stdout);
+    assert.equal(result.bodyBase64, "AP+AAQ==");
+  } finally {
+    fs.rmSync(binarySource, { force: true });
+  }
+
+  const denied = `http://127.0.0.1:${deniedServer.address().port}/back`;
+  const deniedUnfollowed = JSON.parse((await invoke("--response-json", route(denied))).stdout);
+  assert.equal(deniedUnfollowed.response.status, 302);
+  assert.equal(Object.fromEntries(deniedUnfollowed.response.headers).location, denied);
+  await rejectRedirect("REDIRECT_NOT_ALLOWED", "-L", route(denied));
+  assert.equal(deniedRedirectRequests, 0, "disallowed intermediate server received a request");
+  const beforeLimit = echoRequests;
+  await rejectRedirect("REDIRECT_LIMIT_EXCEEDED", "-L", "--max-redirs", "0", route());
+  await rejectRedirect("REDIRECT_LIMIT_EXCEEDED", "-L", "--max-redirs", "1", multiHop);
+  assert.equal(echoRequests, beforeLimit);
+  for (const target of ["file:///etc/passwd", "https://user:secret@example.com/"]) {
+    // Browser Fetch may itself reject an unsupported Location before exposing it.
+    await rejectRedirect("INVALID_REDIRECT|REQUEST_FAILED", "-L", route(target));
+  }
+
+  const cached = route("/echo", 301, "/r-cache");
+  const cachedKey = new URL(cached).pathname + new URL(cached).search;
+  const beforeCached = echoRequests;
+  for (let index = 0; index < 2; index++) {
+    const result = JSON.parse((await invoke("--response-json", cached)).stdout);
+    assert.equal(result.response.status, 301);
+    assert.equal(result.response.body_unavailable, true);
+  }
+  assert.equal(echoRequests, beforeCached);
+  await invoke("-L", cached);
+  await invoke("-L", cached);
+  assert.equal(redirectHits.get(cachedKey), 1, "redirect response was not reused from HTTP cache");
+  results.cachedRedirectPassed = true;
+
+  // Identical URLs with independently delayed responses exercise event correlation.
+  const concurrent = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+    invoke("-L", "-H", `X-Test: concurrent-${index}`, route()).then(result => JSON.parse(result.stdout))));
+  assert.deepEqual(concurrent.map(result => result.testHeader), ["concurrent-0", "concurrent-1", "concurrent-2", "concurrent-3"]);
+  const beforeUnfollowedConcurrent = echoRequests;
+  const concurrentHeaders = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+    invoke("--response-json", "-H", `X-Test: headers-${index}`, route()).then(result => JSON.parse(result.stdout))));
+  assert.deepEqual(concurrentHeaders.map(result => Object.fromEntries(result.response.headers)["x-redirect-test"]),
+    ["headers-0", "headers-1", "headers-2", "headers-3"]);
+  assert.equal(echoRequests, beforeUnfollowedConcurrent);
+
+  // A preloaded HSTS upgrade is still an opaque manual redirect in Chrome.
+  await rejectRedirect("REDIRECT_NOT_ALLOWED", "-L", "http://github.com/");
+  const hsts = JSON.parse((await invoke("--response-json", "http://github.com/")).stdout);
+  assert.equal(hsts.response.status, 307);
+  assert.equal(hsts.response.body_unavailable, true);
+  assert.equal(Object.fromEntries(hsts.response.headers).location, "https://github.com/");
+  assert(!JSON.stringify(hsts).includes("browser-proxy-"));
+  results.hstsRedirectPassed = true;
+
+  for (const setting of ["allowlist", "redirects"]) {
+    const before = echoRequests;
+    const paused = rejectRedirect(setting === "allowlist" ? "REDIRECT_NOT_ALLOWED" : "REDIRECT_BLOCKED", "-L",
+      route("/echo", 302, "/r-gated", { gate: setting }));
+    await waitForGate(setting);
+    if (setting === "allowlist") await setRules([otherOrigin]);
+    else await setRedirects(false);
+    redirectGates.get(setting)();
+    redirectGates.delete(setting);
+    await paused;
+    assert.equal(echoRequests, before, "revoked policy still allowed a redirect target request");
+    await setRules(redirectRules);
+    await setRedirects(true);
+  }
+  results.redirectRevocationPassed = true;
+
+  const timeoutGate = "timeout";
+  const timed = rejectRedirect("TIMEOUT", "-L", "--max-time", "0.5", route("/echo", 302, "/r-gated", { gate: timeoutGate }));
+  await waitForGate(timeoutGate);
+  await timed;
+  redirectGates.delete(timeoutGate);
+
+  // Final downloads still use the streaming path after the redirect loop.
+  await invoke("-L", "--max-time", "120", "-o", largeResponseFile, route("/large-gzip", 307));
+  await assertLargeFile(largeResponseFile);
+  fs.rmSync(largeResponseFile, { force: true });
+  await setRedirects(false);
+  await rejectRedirect("REDIRECT_BLOCKED", "-L", route());
+  results.redirectsPassed = true;
 
   const pagesAfter = await call("list_pages");
   results.foregroundPageAdded = pagesAfter.structuredContent.pages.length !== beforeCount;
@@ -513,7 +765,10 @@ try {
   console.log(JSON.stringify(results, null, 2));
 } finally {
   await client.close().catch(() => {});
+  server.closeAllConnections();
+  deniedServer.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => deniedServer.close(resolve));
   fs.rmSync(profileNativeManifest, { force: true });
   fs.rmSync(largeResponseFile, { force: true });
 }

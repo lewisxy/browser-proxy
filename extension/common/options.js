@@ -7,6 +7,8 @@ const messageOutput = document.querySelector("#message");
 const connectionOutput = document.querySelector("#connection");
 const importFileInput = document.querySelector("#import-file");
 const reconnectButton = document.querySelector("#reconnect");
+const redirectsInput = document.querySelector("#redirects-enabled");
+const redirectsMessage = document.querySelector("#redirects-message");
 
 function rulesFromInput() {
   return allowlistInput.value
@@ -45,8 +47,9 @@ async function updateStatus() {
 }
 
 async function load() {
-  const { allowlist } = await optionsApi.storage.local.get({ allowlist: [] });
+  const { allowlist, redirectsEnabled } = await optionsApi.storage.local.get({ allowlist: [], redirectsEnabled: false });
   allowlistInput.value = allowlist.join("\n");
+  redirectsInput.checked = redirectsEnabled === true;
   updateCount();
   await updateStatus();
 }
@@ -106,6 +109,20 @@ async function exportAllowlist() {
 }
 
 document.querySelector("#save").addEventListener("click", save);
+redirectsInput.addEventListener("change", async () => {
+  redirectsInput.disabled = true;
+  try {
+    await optionsApi.storage.local.set({ redirectsEnabled: redirectsInput.checked });
+    redirectsMessage.textContent = redirectsInput.checked ? "Redirects enabled for requests using -L." : "Redirects disabled.";
+    redirectsMessage.className = "message success";
+  } catch (error) {
+    redirectsInput.checked = !redirectsInput.checked;
+    redirectsMessage.textContent = `Could not save redirects: ${error.message}`;
+    redirectsMessage.className = "message error";
+  } finally {
+    redirectsInput.disabled = false;
+  }
+});
 document.querySelector("#import").addEventListener("click", () => importFileInput.click());
 document.querySelector("#export").addEventListener("click", exportAllowlist);
 importFileInput.addEventListener("change", importAllowlist);

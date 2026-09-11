@@ -64,11 +64,29 @@ Downloads stream to stdout or `-o FILE` with bounded buffers in the extension, n
 
 The CLI acknowledges each chunk after writing it, so a slow disk or pipe pauses the download. A failed download returns a nonzero status and may leave a partial output file. Uploads remain limited to 16 MiB; `--response-json` retains its buffered 32 MiB response limit. See [streaming downloads](docs/user-guide.md#streaming-downloads) for details.
 
+### Follow Redirects
+
+Without `-L`, a redirect returns its original status and sanitized headers without contacting its target. Use `-i`, `-I`, or `-D` to view headers, including `Location`:
+
+```sh
+.venv/bin/browser-proxy -i https://example.com/start
+```
+
+Browser Fetch does not expose redirect bodies. The CLI reports this on stderr (`-s` suppresses the notice), and `--response-json` marks the header-only response with `body_unavailable: true`. An unfollowed redirect is a successful HTTP exchange, with exit status 0.
+
+Turn on **Enable redirects** in extension settings (off by default), allow every destination origin, and use `-L`:
+
+```sh
+.venv/bin/browser-proxy -L --max-redirs 5 https://example.com/start
+```
+
+The extension checks the latest allowlist before every hop, including same-origin redirects. The default limit is 20 redirects and `--max-time` covers the complete chain and download. Missing browser redirect metadata stops the request rather than following an unchecked destination. See [redirect behavior](docs/user-guide.md#redirects).
+
 ## Security Summary
 
 - The allowlist is empty by default and can only be changed in extension UI.
 - Rules match origins, never paths. Wildcards are explicit.
-- Redirects are always rejected, preventing an allowed endpoint from redirecting into another origin.
+- Following redirects requires both the extension setting and client opt-in. Each hop is authorized before it is issued; clients cannot enable the setting or change the allowlist. Without opt-in, only the redirect's status and sanitized headers are returned.
 - Browser-controlled request headers, including `Cookie`, cannot be supplied by a client.
 - The browser's Fetch API filters `Set-Cookie` from response headers.
 - The local socket and its directory are owner-only, but every process running as the same OS user is inside the local trust boundary.
@@ -92,6 +110,14 @@ npm run test:chrome
 ```
 
 Its browser profile, temporary native manifest, screenshots, logs, and results are kept under `.browser-proxy/`. Set `CHROME_PATH` when Chrome is not installed at the platform's usual location.
+
+To additionally check a live HEAD redirect in that isolated profile, set `BROWSER_PROXY_LIVE_REDIRECT_URL`, for example:
+
+```sh
+BROWSER_PROXY_LIVE_REDIRECT_URL=https://google.com/ npm run test:chrome
+```
+
+The live probe only allows the initial origin and requests headers without following. The regular suite uses local fixtures and does not depend on this optional endpoint.
 
 ## Uninstall
 

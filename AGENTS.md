@@ -74,7 +74,8 @@ Do not weaken these properties without explicit user approval and corresponding 
 - Rules authorize origins, not paths, and wildcard matching must preserve hostname boundaries.
 - Every request is checked against the latest stored allowlist.
 - Fetch always uses `credentials: "include"` so credentials remain browser-managed.
-- Redirects remain unfollowed with `redirect: "manual"`; opaque and 3xx responses must return `REDIRECT_BLOCKED` before reading a body.
+- Every Fetch uses `redirect: "manual"`. Redirect following requires both client opt-in and the extension UI setting (off by default). Each hop must pass the latest allowlist before being issued; missing or ambiguous metadata fails closed. Never read redirect bodies, automatically retry for metadata, or use Fetch's automatic following. Preserve hop and whole-chain timeout limits.
+- Without client redirect opt-in, return the original redirect status and sanitized headers when available, with `body_unavailable: true` and zero transported body bytes. The unfollowed target is never contacted and does not require allowlist authorization. Never expose raw Set-Cookie headers or pretend the omitted body is the server's empty response.
 - Clients cannot set browser-controlled headers such as `Cookie`, `Host`, `Content-Length`, or `Sec-*`.
 - Responses do not expose `Set-Cookie` headers.
 - Request, response, framing, concurrency, and timeout limits remain enforced.

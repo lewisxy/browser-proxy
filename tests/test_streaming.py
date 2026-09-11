@@ -235,6 +235,41 @@ class StreamingIntegrationTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), b"")
         self.assertIn("HTTP 404", stderr)
 
+    def test_unfollowed_redirect_metadata_survives_both_relay_modes(self):
+        metadata = {
+            "status": 302, "status_text": "Found", "url": "https://example.com/file",
+            "headers": [["location", "https://denied.example/end"], ["content-length", "999"]],
+            "body_unavailable": True,
+        }
+
+        def browser():
+            for streaming in (True, False):
+                start = self.read_native()
+                self.assertEqual(start["type"], "request_start")
+                self.assertEqual(start.get("stream_response", False), streaming)
+                self.assertFalse(start["request"].get("follow_redirects", False))
+                self.assertEqual(self.read_native()["type"], "request_end")
+                self.send_native(envelope("response_start", start["id"], response=metadata, body_bytes=None if streaming else 0))
+                if streaming:
+                    self.expect_ack(start["id"], -1)
+                self.send_native(envelope("response_end", start["id"], chunks=0, **({"body_bytes": 0} if streaming else {})))
+
+        driver = self.start_driver(browser)
+        header_path = Path(self.directory.name) / "redirect-headers.txt"
+        body_path = Path(self.directory.name) / "redirect-body.bin"
+        output = io.BytesIO()
+        code, stderr = self.run_cli(output, "--fail", "-i", "-D", str(header_path), "-o", str(body_path))
+        self.assertEqual(code, 0)
+        self.assertIn("response body is unavailable", stderr)
+        expected = b"HTTP/1.1 302 Found\r\nlocation: https://denied.example/end\r\ncontent-length: 999\r\n\r\n"
+        self.assertEqual(header_path.read_bytes(), expected)
+        self.assertEqual(body_path.read_bytes(), expected)
+        self.assertEqual(output.getvalue(), b"")
+        result = exchange_local(envelope("request", "buffered-redirect", request={"url": "https://example.com/file"}), self.socket_path, 1, 3)
+        self.finish_driver(driver)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["response"], {**metadata, "body": {"encoding": "base64", "data": ""}})
+
     def test_fail_with_body_streams_file_and_headers(self):
         def browser():
             request_id = self.accept_request(status=404)

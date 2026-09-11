@@ -71,6 +71,9 @@ class NativeHostTests(unittest.TestCase):
                     "body": {"encoding": "base64", "data": base64.b64encode(request_body).decode("ascii")},
                     "timeout_ms": 1000,
                     "cache": "default",
+                    "follow_redirects": True,
+                    "max_redirects": 3,
+                    "redirectsEnabled": True,
                 },
             }
             result: dict = {}
@@ -85,6 +88,9 @@ class NativeHostTests(unittest.TestCase):
             end = read_framed(process.stdout, NATIVE_LENGTH, MAX_LOCAL_MESSAGE_BYTES)
             self.assertEqual(start["type"], "request_start")
             self.assertEqual(start["body_bytes"], len(request_body))
+            self.assertTrue(start["request"]["follow_redirects"])
+            self.assertEqual(start["request"]["max_redirects"], 3)
+            self.assertNotIn("redirectsEnabled", start["request"])
             self.assertEqual(base64.b64decode(chunk["data"]), request_body)
             self.assertEqual(end, {"protocol": PROTOCOL_NAME, "version": 1, "type": "request_end", "id": request_id, "chunks": 1})
 

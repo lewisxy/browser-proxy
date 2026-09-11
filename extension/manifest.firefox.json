@@ -3,9 +3,9 @@
   "name": "Browser Proxy",
   "description": "Safely relay allowlisted HTTP requests through your browser session.",
   "version": "0.1.0",
-  "permissions": ["activeTab", "nativeMessaging", "storage", "<all_urls>"],
+  "permissions": ["activeTab", "nativeMessaging", "storage", "webRequest", "webRequestBlocking", "<all_urls>"],
   "background": {
-    "scripts": ["policy.js", "background.js"],
+    "scripts": ["policy.js", "redirects.js", "redirect-observer.js", "background.js"],
     "persistent": true
   },
   "browser_action": {

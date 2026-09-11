@@ -19,6 +19,7 @@ const forbiddenHeaders = new Set([
   "upgrade",
 ]);
 const cacheModes = new Set(["default", "no-store", "reload", "no-cache", "force-cache"]);
+const fetchHop = BrowserProxyRedirectObserver.create(extensionApi);
 
 let nativePort = null;
 let nativeReady = false;
@@ -107,6 +108,13 @@ function validateRequestStart(message) {
   if (message.stream_response !== undefined && typeof message.stream_response !== "boolean") {
     throw new Error("stream_response must be a boolean");
   }
+  if (request.follow_redirects !== undefined && typeof request.follow_redirects !== "boolean") {
+    throw new Error("follow_redirects must be a boolean");
+  }
+  const maxRedirects = request.max_redirects === undefined ? BrowserProxyRedirects.maxRedirects : request.max_redirects;
+  if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > BrowserProxyRedirects.maxRedirects) {
+    throw new Error(`max_redirects must be an integer between 0 and ${BrowserProxyRedirects.maxRedirects}`);
+  }
 
   return {
     url: request.url,
@@ -116,6 +124,8 @@ function validateRequestStart(message) {
     cache,
     bodyBytes,
     streamResponse: message.stream_response === true,
+    follow_redirects: request.follow_redirects === true,
+    max_redirects: maxRedirects,
   };
 }
 
@@ -174,16 +184,27 @@ async function readResponseBody(response) {
   return joinChunks(chunks, total);
 }
 
-function sendSuccess(id, response, body, port) {
+function responseMetadata(response, history) {
+  const metadata = {
+    status: response.status,
+    status_text: response.statusText,
+    url: response.url,
+    headers: Array.from(response.headers.entries()).filter(([name]) => !["set-cookie", "set-cookie2"].includes(name.toLowerCase())),
+    ...(response.bodyUnavailable ? { body_unavailable: true } : {}),
+    ...(history.length ? { redirected: true, redirects: history } : {}),
+  };
+  // Leave room for the envelope and worst-case JSON escaping in the relay.
+  if (JSON.stringify(metadata).length * 6 + 1024 > 1024 * 1024) {
+    throw new BrowserProxyRedirects.RedirectError("RESPONSE_TOO_LARGE", "Response metadata exceeds the native frame limit");
+  }
+  return metadata;
+}
+
+function sendSuccess(id, response, body, port, history) {
   sendNative({
     type: "response_start",
     id,
-    response: {
-      status: response.status,
-      status_text: response.statusText,
-      url: response.url,
-      headers: Array.from(response.headers.entries()),
-    },
+    response: responseMetadata(response, history),
     body_bytes: body.length,
   }, port);
   let sequence = 0;
@@ -225,22 +246,13 @@ function sendAcknowledged(message, sequence, active) {
   });
 }
 
-async function streamSuccess(id, response, active) {
+async function streamSuccess(id, response, active, history) {
   const start = {
     type: "response_start",
     id,
-    response: {
-      status: response.status,
-      status_text: response.statusText,
-      url: response.url,
-      headers: Array.from(response.headers.entries()),
-    },
+    response: responseMetadata(response, history),
     body_bytes: null,
   };
-  // Bound metadata too, including worst-case JSON escaping by the Python relay.
-  if (JSON.stringify(start).length * 6 + 128 > 1024 * 1024) {
-    throw new Error("Response metadata exceeds the streaming frame limit");
-  }
   let reader;
   let complete = false;
   try {
@@ -288,64 +300,35 @@ async function executeRequest(id, state) {
   const controller = new AbortController();
   const active = { port, controller };
   activeRequests.set(id, active);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, request.timeout_ms);
   try {
-    const { allowlist } = await storageGet({ allowlist: [] });
-    if (!BrowserProxyPolicy.isAllowed(request.url, allowlist)) {
-      sendError(id, "ORIGIN_NOT_ALLOWED", "The request origin is not in the extension allowlist", null, port);
-      return;
-    }
-    if (port !== nativePort) {
-      return;
-    }
-
     const body = joinChunks(state.chunks, state.receivedBytes);
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, request.timeout_ms);
-
-    try {
-      const response = await fetch(request.url, {
-        method: request.method,
-        headers: new Headers(request.headers),
-        body: body.length ? body : undefined,
-        credentials: "include",
-        redirect: "manual",
-        cache: request.cache,
-        signal: controller.signal,
-      });
-      if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
-        sendError(
-          id,
-          "REDIRECT_BLOCKED",
-          "The request returned a redirect, which Browser Proxy does not follow; retry with the final URL",
-          null,
-          port,
-        );
-        return;
-      }
-      if (request.streamResponse) {
-        await streamSuccess(id, response, active);
-      } else {
-        const responseBody = await readResponseBody(response);
-        sendSuccess(id, response, responseBody, port);
-      }
-    } catch (error) {
-      if (timedOut) {
-        sendError(id, "TIMEOUT", `Request exceeded ${request.timeout_ms} ms`, null, port);
-      } else if (error.message.startsWith("Response body exceeds")) {
-        sendError(id, "RESPONSE_TOO_LARGE", error.message, null, port);
-      } else {
-        sendError(id, "REQUEST_FAILED", error.message || "The browser request failed", null, port);
-      }
-    } finally {
-      clearTimeout(timer);
-      controller.abort();
+    const { response, history } = await BrowserProxyRedirects.execute(
+      request, body, controller.signal, storageGet, fetchHop,
+    );
+    if (request.streamResponse) {
+      await streamSuccess(id, response, active, history);
+    } else {
+      const responseBody = await readResponseBody(response);
+      sendSuccess(id, response, responseBody, port, history);
     }
   } catch (error) {
-    sendError(id, "INVALID_REQUEST", error.message, null, port);
+    if (timedOut) {
+      sendError(id, "TIMEOUT", `Request exceeded ${request.timeout_ms} ms`, null, port);
+    } else if (error instanceof BrowserProxyRedirects.RedirectError) {
+      sendError(id, error.code, error.message, error.details, port);
+    } else if (error.message.startsWith("Response body exceeds")) {
+      sendError(id, "RESPONSE_TOO_LARGE", error.message, null, port);
+    } else {
+      sendError(id, "REQUEST_FAILED", error.message || "The browser request failed", null, port);
+    }
   } finally {
+    clearTimeout(timer);
+    controller.abort();
     bufferedRequestBytes -= state.receivedBytes;
     if (activeRequests.get(id) === active) {
       activeRequests.delete(id);

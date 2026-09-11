@@ -41,7 +41,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--connect-timeout", type=float, default=2.0, metavar="SECONDS", help="Relay connect timeout")
     result.add_argument("--no-cache", action="store_true", help="Ask the browser to bypass its HTTP cache")
     result.add_argument("--compressed", action="store_true", help="Accept browser-managed response compression")
-    result.add_argument("-L", "--location", action="store_true", help="Follow redirects (intentionally unsupported)")
+    result.add_argument("-L", "--location", action="store_true", help="Follow allowlisted redirects when enabled in extension settings")
+    result.add_argument("--max-redirs", type=int, default=20, metavar="N", help="Maximum redirects with -L (0 through 20; default: 20)")
     result.add_argument("-i", "--include", action="store_true", help="Include response status and headers")
     result.add_argument("-D", "--dump-header", metavar="FILE", help="Write response status and headers to a file")
     result.add_argument("-o", "--output", metavar="FILE", help="Write response body to a file")
@@ -191,6 +192,8 @@ def build_request(arguments: argparse.Namespace) -> dict[str, Any]:
         "body": {"encoding": "base64", "data": base64.b64encode(body).decode("ascii")},
         "timeout_ms": round(arguments.max_time * 1000),
         "cache": "no-cache" if arguments.no_cache else "default",
+        "follow_redirects": arguments.location,
+        "max_redirects": arguments.max_redirs,
     }
 
 
@@ -253,6 +256,12 @@ def stream_download(arguments: argparse.Namespace, message: dict[str, Any], sock
                     status = int(response.get("status", 0))
                     header = response_head(response)
                     fail_status = status >= 400 and (arguments.fail or arguments.fail_with_body)
+                    if response.get("body_unavailable") is True and message["request"].get("method", "GET") != "HEAD":
+                        if not arguments.silent or arguments.verbose:
+                            print(
+                                f"browser-proxy: HTTP {status} redirect not followed; its response body is unavailable in browser Fetch",
+                                file=sys.stderr,
+                            )
                     if arguments.verbose:
                         for line in header.decode("utf-8").splitlines():
                             print(f"< {line}", file=sys.stderr)
@@ -289,8 +298,8 @@ def main() -> int:
     arguments = parser().parse_args()
     if not arguments.url:
         parser().error("the following arguments are required: url")
-    if arguments.location:
-        parser().error("-L/--location is disabled because redirects could escape the origin allowlist")
+    if not 0 <= arguments.max_redirs <= 20:
+        parser().error("--max-redirs must be between 0 and 20")
     if arguments.max_time <= 0 or arguments.max_time > 300:
         parser().error("--max-time must be greater than 0 and no more than 300 seconds")
     if arguments.connect_timeout <= 0:

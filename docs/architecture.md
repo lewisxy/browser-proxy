@@ -17,7 +17,7 @@ Python native host
         v
 extension background
         |
-        | Fetch API, credentials=include, redirect=manual (unfollowed)
+        | Fetch API, credentials=include, redirect=manual (one authorized hop)
         v
 allowlisted HTTP(S) origin
 ```
@@ -31,7 +31,7 @@ allowlisted HTTP(S) origin
 - Opens a long-lived native port named `com.browserproxy.native`.
 - Reconnects when the host is installed or restarted.
 - Reassembles bounded request chunks.
-- Reads the allowlist directly from extension-local storage for every request.
+- Reads the allowlist directly from extension-local storage before every request and redirect hop.
 - Validates the URL, method, headers, body size, timeout, and cache mode.
 - Performs background `fetch()` with fixed credential and redirect policies.
 - For streaming downloads, uses a 384 KiB Fetch BYOB reader and waits for each downstream acknowledgement before reading more.
@@ -56,7 +56,21 @@ Rules have this grammar:
 
 An omitted port means the default port for the matched scheme. `*.example.com` matches both `example.com` and its subdomains, but not `notexample.com`. A rule cannot contain a path, query, fragment, or credentials.
 
-The policy checks the URL before Fetch. Fetch uses `redirect: "manual"`; an opaque or 3xx redirect response becomes `REDIRECT_BLOCKED`, and no request is sent to the redirect destination.
+The policy checks the URL before Fetch. Every Fetch uses `redirect: "manual"`. Following requires client opt-in and the extension's `redirectsEnabled` setting, which starts false. `extension/common/redirects.js` controls the loop, checks the latest stored policy before each hop, applies HTTP method/body/header transformations, and caps the chain at 20 followed redirects. With opt-in, only the final response enters the buffered or streaming output path. Without opt-in, a redirect returns its original status and sanitized headers as a header-only response with `body_unavailable: true`. No target is requested or needs authorization in that case. The native host cannot enable the setting.
+
+### Redirect Observation
+
+`extension/common/redirect-observer.js` registers webRequest listeners before the native host connects. Manual Fetch usually returns an opaque response with no readable status, headers, or body. The observer captures redirect status, reason text, and a validated header snapshot from `onHeadersReceived`, with `onBeforeRedirect` as a fallback for browser-generated redirects. Set-Cookie and Set-Cookie2 are dropped before copying their values; the raw header array is never retained. Requests without client opt-in also use observation so their redirect headers can be returned, even with the UI setting off.
+
+Every observed hop replaces its outgoing URL fragment with a fresh cryptographic UUID. The fragment is visible in browser webRequest events but is not sent over HTTP, does not modify path/query/headers/body, and does not change the HTTP cache key. Events must identify this extension as initiator, and the initial URL/method/tag must match exactly before binding a browser request ID. Subsequent events use that binding. Tags are removed from fallback redirect metadata and browser-generated Location headers; public history uses the original URLs. Fresh tags avoid ambiguity for identical concurrent URLs, cache responses, aborted requests, and replacement native ports without serializing unrelated operations. Trackers are removed on success, failure, or abort; late events cannot match a new tag.
+
+A response event may establish the same exact binding if the browser omits or delays onBeforeRequest. This still requires the extension initiator, full tagged URL, and original method to match; an untagged URL or an event for a different method is insufficient.
+
+Chrome uses passive webRequest observation. Firefox additionally uses a blocking onBeforeRequest listener to cancel unexpected URL/method rewrites of tagged requests, rather than letting the browser automatically advance them. Chrome HTTP-cache redirects and preloaded HSTS upgrades are tested as manually stopped, observable hops. If the browser omits required events, correlation is ambiguous, or it unexpectedly changes the final URL, the request fails closed with `REDIRECT_UNINSPECTABLE`. Missing events are given at most one second after Fetch returns, within the overall request deadline. There is no probe, replay, automatic-follow fallback, or redirect-body reading.
+
+The loop retains a single buffered upload for 307/308 replay and occupies one logical concurrency slot. The one request deadline covers policy reads, all hops, metadata observation, final body reads, and streaming acknowledgements. Turning off redirects or revoking an origin stops subsequent hops, not requests already sent.
+
+Unfollowed responses have a null internal body and an explicit unavailable-body marker, so neither output path obtains a redirect reader. Buffered transport sends an empty base64 body; streaming sends start, waits for its acknowledgement, then sends end with zero chunks/bytes. The server's Content-Length can remain in the headers but is not interpreted as a transport length. The existing metadata frame bound also applies to these snapshots. The CLI reports the omission on stderr except in silent/HEAD mode, while JSON clients receive the metadata flag.
 
 ### Native Host
 
@@ -84,7 +98,8 @@ The extension does not read cookies with a cookie API. It asks browser Fetch to 
 - HttpOnly cookies are usable but never visible to Python.
 - Cookie selection, SameSite behavior, partitioning, expiry, and secure transport are enforced by the browser.
 - `Cookie`, `Set-Cookie`, `Host`, `Content-Length`, `Connection`, `Transfer-Encoding`, `Upgrade`, proxy authorization, and `Sec-*` request headers are rejected.
-- Fetch does not expose `Set-Cookie` response headers to extension JavaScript.
+- Fetch response headers exclude `Set-Cookie`; the response serializer also filters it explicitly. The redirect observer ignores cookie headers exposed by privileged webRequest events.
+- Authorization is stripped on cross-origin redirects. Cookies are selected by the browser anew at each hop, including cookies set on intermediate responses.
 
 An endpoint can still return sensitive information in its response body. That is the purpose and inherent authority of this proxy, so allowlists should be narrow.
 
@@ -110,7 +125,7 @@ Socket permissions stop other OS users, not another process already running as t
 - Allowing `*://*` effectively gives all same-user applications browser-session request authority over every HTTP site.
 - CSRF protections based only on cookies may be satisfied. CSRF tokens stored in page DOM or JavaScript are not automatically available.
 - Host permission is broad at browser-install time because runtime origin policy is maintained independently in extension storage.
-- Redirects are unavailable, including safe same-origin redirects, because cross-browser Fetch cannot inspect and authorize every target before it is contacted.
+- Redirects require explicit enablement and every hop's authorization. Browser-restricted or unobservable redirects are rejected, even if the destination might be allowed.
 - DNS resolution is left to the browser. An allowed hostname is trusted regardless of the address to which it resolves.
 
 ## Limits And Concurrency
@@ -121,6 +136,7 @@ Socket permissions stop other OS users, not another process already running as t
 | Buffered response body | 32 MiB |
 | Streamed response byte counter | 2^53 - 1 bytes |
 | Request timeout | 300 seconds |
+| Followed redirects | 20 per logical request |
 | Concurrent extension requests | 16 |
 | Buffered incoming request data | 32 MiB |
 | Request headers | 128 |

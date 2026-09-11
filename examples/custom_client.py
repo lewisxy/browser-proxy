@@ -53,6 +53,8 @@ def main() -> int:
     if not response["ok"]:
         print(f"{response['error']['code']}: {response['error']['message']}", file=sys.stderr)
         return 1
+    if response["response"].get("body_unavailable"):
+        print(f"HTTP {response['response']['status']}: redirect not followed; response body unavailable", file=sys.stderr)
     sys.stdout.buffer.write(base64.b64decode(response["response"]["body"]["data"]))
     return 0
 

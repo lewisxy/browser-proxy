@@ -70,6 +70,44 @@ The version 1 format is:
 
 Import files are limited to 1 MiB and 1000 rules. Rules are normalized and duplicates are removed during import and export.
 
+### Redirects
+
+Without `-L` / `--location`, Browser Proxy returns a redirect's original HTTP status and sanitized response headers, including `Location`, without contacting the destination. Only the initial origin needs to be allowlisted; a Location value is data, not authorization to request it. This works even when **Enable redirects** is off.
+
+```sh
+browser-proxy -i https://example.com/start
+browser-proxy -I https://example.com/start
+browser-proxy -D headers.txt -o body.bin https://example.com/start
+browser-proxy --response-json https://example.com/start
+```
+
+An unfollowed redirect exits with status 0, including with `--fail`. Unlike curl, browser Fetch does not expose the redirect's HTML/text body. Browser Proxy sends zero body bytes and marks the response `body_unavailable: true`. This means the body was omitted, not that the server necessarily sent an empty body. `-i`, `-I`, and `-D` display the headers; normal body-only output is empty. A response Content-Length header describes the server's response, not the number of bytes Browser Proxy returns.
+
+For non-HEAD requests, the CLI prints a notice on stderr explaining the unavailable body. `-s` suppresses this informational notice (including with `-S`); `-v` shows it. `--response-json` exposes the flag directly without the notice. No placeholder content or synthetic HTTP header is added. Set-Cookie and Set-Cookie2 are excluded from the returned headers.
+
+The **Enable redirects** checkbox in extension settings is off by default and saves immediately. Enabling it permits applications to request redirect following with `-L` / `--location`:
+
+```sh
+browser-proxy -L https://example.com/start
+browser-proxy -L --max-redirs 5 -o download.bin https://example.com/download
+```
+
+Both the checkbox and `-L` are required to follow redirects. With `-L` and the checkbox off, a redirect still produces `REDIRECT_BLOCKED`. Every followed destination must match the latest allowlist, including intermediate destinations and same-origin hops. For example, following a redirect from `https://google.com` to `https://www.google.com` requires both origins. Following HTTPS upgrades also requires an HTTPS rule; an HTTP rule alone does not authorize HTTPS.
+
+Disabling redirects or removing an origin takes effect before the next hop of an in-progress chain. Requests already sent cannot be undone. Allowlist import/export transfers only origin rules and does not change the redirect checkbox. Local applications cannot change either setting.
+
+`--max-redirs` accepts 0 through 20, defaults to 20, and counts followed redirects (not the initial request). Zero rejects the first redirect when following is enabled. One `--max-time` deadline covers the entire chain, redirect inspection, final download, and output acknowledgements.
+
+Supported redirect statuses are 301, 302, 303, 307, and 308. POST changes to GET for 301/302; 303 changes methods other than GET/HEAD to GET. Those changes discard the body and body-related headers, including Content-Type. 307/308 preserve the method and exact body bytes. These rules also apply when `-X` explicitly specified the method, unlike some curl behaviors. Authorization is removed on an origin change and is never restored later in the chain. Other caller-supplied headers are retained; this includes custom API-key headers, so only allow destinations to which those headers may be sent.
+
+Each hop is a separate credentialed browser Fetch with automatic redirects disabled. Cookies (including cookies set on intermediate or unfollowed responses) stay browser-managed. Requests use a no-referrer policy, and the browser's Origin, SameSite, and other request-context behavior can differ from a browser navigation or a single automatically followed Fetch. HTML/JavaScript redirects and meta refresh are not followed. Non-redirect 3xx responses, such as 300/304 or a readable 302 without Location, are ordinary HTTP responses regardless of `-L`.
+
+With `-L`, only the final response headers and body are output, including with `-i` or `-D`. `--response-json` also includes `redirected: true` and a bounded `redirects` history when hops were followed. Intermediate response bodies and Set-Cookie headers are not returned.
+
+Redirect inspection requires the browser to expose correlated `webRequest` events. Chrome's HTTP-cache redirects and preloaded HSTS upgrades are covered by the integration test. A missing or ambiguous event (for example, a browser-restricted URL or unobservable cache response) produces `REDIRECT_UNINSPECTABLE`, with no automatic retry of the request. Firefox additionally cancels unexpected automatic internal rewrites; use the final URL if the browser cannot expose a manually controlled hop.
+
+After upgrading, rebuild/reload the extension to grant its webRequest permission (also webRequestBlocking on Firefox), then reconnect the native host. Older extensions return `REDIRECT_BLOCKED` instead of unfollowed response headers. Older clients can consume the response frames, but should be updated to recognize `body_unavailable` rather than mistake omitted content for a genuinely empty body. Update the host too: a host predating redirect support omits the follow flag, so even a request with `-L` can arrive at the extension as an unfollowed request.
+
 ## CLI Requests
 
 Select Chrome by default or pass `--browser firefox`.
@@ -154,7 +192,8 @@ Useful exit statuses follow curl where practical:
 
 ### Curl Differences
 
-- `-L`/`--location` is intentionally rejected. Redirects return `REDIRECT_BLOCKED` and are not followed because Fetch cannot expose and authorize every destination before contacting it.
+- Without `-L`, redirect status and headers are available, but the redirect body is omitted and explicitly marked unavailable. The CLI reports this on stderr unless silent; `--response-json` exposes `body_unavailable: true`.
+- `-L`/`--location` requires **Enable redirects** in extension settings and authorization of every hop. The limit is at most 20; only final response headers are output. See [Redirects](#redirects) for method and credential handling.
 - TLS options, client certificates, proxies, DNS overrides, HTTP version selection, and raw transfer encodings are browser-owned and not configurable.
 - Compression is browser-managed; `--compressed` is accepted as a compatibility no-op.
 - Fetch may combine duplicate headers and transparently decode response content.
@@ -190,7 +229,15 @@ Compare scheme, hostname, and effective port. `localhost` and `127.0.0.1` are di
 
 ### Request Failed
 
-`REDIRECT_BLOCKED` means the server returned a redirect. Redirects are not followed even when their destination is also allowed; pass the final URL directly. For example, `https://google.com` redirects to `https://www.google.com/`.
+`REDIRECT_BLOCKED` means the request asked to follow redirects (`-L`) but the extension setting was off or disabled during the chain. Enable it or omit `-L` to inspect the redirect status and headers. Older extensions also return this error for requests without `-L`; reload an updated build for header-only responses.
+
+`REDIRECT_NOT_ALLOWED` means an intermediate destination failed the latest allowlist check. `--response-json` exposes its hop number and source/target origins in the error details. Add the missing origin in extension settings if appropriate.
+
+`REDIRECT_LIMIT_EXCEEDED` means the configured hop limit was reached. `INVALID_REDIRECT` means a target is malformed, too long, non-HTTP(S), or contains URL credentials; the browser may reject some of these itself with `REQUEST_FAILED`. `REDIRECT_UNINSPECTABLE` means trustworthy browser metadata was unavailable; retry using a known final URL rather than automatically resubmitting a state-changing request.
+
+With `--response-json`, observation failures include boolean diagnostics under `error.details`: `request_observed`, `response_headers_observed`, `redirect_observed`, and `metadata_invalid`. Missing-request-event failures also check `web_request_permission` and `host_permission` when the browser exposes the permission API. Check the extension's site access and reload the updated extension if either is false. A Chrome session that previously granted webRequest as an optional permission can retain broken interception state even after switching back to required permissions; it may need a one-time full browser restart. This is distinct from enabling redirects normally with required permissions. The diagnostic flags contain no URLs, headers, or cookies, and never request additional access.
+
+`extension_events_observed` indicates whether any extension-initiated webRequest events arrived during the request (possibly for another concurrent request). When it is false and both permission flags are true, missing browser interception is the likely cause, rather than rejected header metadata.
 
 `REQUEST_FAILED` covers other Fetch failures, including DNS/TLS failure, browser cookie policy, a server rejecting extension-origin requests, or an unsupported browser-controlled header. Retry with `-v`; browser developer tools can provide network details.
 

@@ -81,7 +81,7 @@ class NativeHost:
     ) -> None:
         metadata = {
             key: request[key]
-            for key in ("url", "method", "headers", "timeout_ms", "cache")
+            for key in ("url", "method", "headers", "timeout_ms", "cache", "follow_redirects", "max_redirects")
             if key in request
         }
         with self.native_write_lock:

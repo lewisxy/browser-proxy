@@ -65,6 +65,7 @@ test("reports ready only for the current native port", async () => {
   vm.runInNewContext(source, {
     chrome,
     BrowserProxyPolicy: {},
+    BrowserProxyRedirectObserver: { create: () => () => {} },
     AbortController,
     setTimeout(callback) {
       reconnectTimer = callback;
@@ -119,7 +120,7 @@ test("reports ready only for the current native port", async () => {
   assert.equal(typeof reconnectTimer, "function");
 });
 
-function streamingBackground(response, onMessage = () => {}) {
+function streamingBackground(response, onMessage = () => {}, settings = {}) {
   const ports = [createPort(), createPort()];
   const messages = [];
   let nextPort = 0;
@@ -130,19 +131,21 @@ function streamingBackground(response, onMessage = () => {}) {
         connectNative: () => ports[nextPort++],
         onMessage: { addListener() {} },
       },
-      storage: { local: { get: async () => ({ allowlist: ["https://example.com"] }) } },
+      storage: { local: { get: async defaults => ({ ...defaults, allowlist: ["https://example.com"], ...settings }) } },
     },
-    BrowserProxyPolicy: { parseRequestUrl() {}, isAllowed: () => true },
-    AbortController, Headers, Uint8Array, atob, btoa,
+    BrowserProxyPolicy: require("../extension/common/policy.js"),
+    BrowserProxyRedirectObserver: { create: () => async (url, init) => ({ response: await context.fetch(url, init) }) },
+    AbortController, Headers, Uint8Array, URL, atob, btoa,
     setTimeout: (...args) => setTimeout(...args).unref(),
     clearTimeout,
     fetch: async (_url, options) => {
       fetchSignal = options.signal;
-      return response;
+      return typeof response === "function" ? response(_url, options) : response;
     },
   });
   ports[0].postMessage = (message) => onMessage(message);
   ports[1].postMessage = (message) => messages.push(message);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "extension", "common", "redirects.js"), "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "extension", "common", "background.js"), "utf8"), context);
   const send = (type, fields = {}, port = ports[0]) => port.receive({
     protocol: "browser-proxy", version: 1, id: "stream-test", type, ...fields,
@@ -150,9 +153,9 @@ function streamingBackground(response, onMessage = () => {}) {
   return {
     context, ports, messages, send,
     signal: () => fetchSignal,
-    start(stream = true, timeout = 30000) {
+    start(stream = true, timeout = 30000, requestOptions = {}) {
       send("request_start", {
-        request: { url: "https://example.com/file", timeout_ms: timeout },
+        request: { url: "https://example.com/file", timeout_ms: timeout, ...requestOptions },
         body_bytes: 0, stream_response: stream,
       });
       send("request_end", { chunks: 0 });
@@ -249,18 +252,50 @@ for (const action of ["cancel", "disconnect", "timeout", "bad ack"]) {
   });
 }
 
-test("streaming rejects redirects before reading a response body", async () => {
+test("streaming rejects disabled redirect following before reading a response body", async () => {
   let reads = 0;
   let lastMessage;
   const response = new Response(new ReadableStream({
     type: "bytes", pull() { reads += 1; },
   }), { status: 302, headers: { Location: "https://other.example/file" } });
   const background = streamingBackground(response, (message) => { lastMessage = message; });
-  background.start();
+  background.start(true, 30000, { follow_redirects: true });
   await waitUntil(() => lastMessage?.type === "response_error");
   assert.equal(lastMessage.error.code, "REDIRECT_BLOCKED");
   assert.equal(reads, 0);
 });
+
+for (const stream of [false, true]) {
+  test(`unfollowed redirects return explicit header-only metadata (${stream ? "streaming" : "buffered"})`, async () => {
+    let reads = 0;
+    let cancelled = false;
+    const messages = [];
+    const response = new Response(new ReadableStream({
+      type: "bytes", pull() { reads += 1; }, cancel() { cancelled = true; },
+    }), { status: 302, statusText: "Found", headers: {
+      Location: "https://denied.example/", "Set-Cookie": "hidden=secret", "Content-Length": String(64 * 1024 * 1024),
+    } });
+    const background = streamingBackground(response, message => messages.push(message));
+    background.start(stream);
+    await waitUntil(() => messages.length);
+    const start = messages[0];
+    assert.equal(start.type, "response_start");
+    assert.equal(start.response.status, 302);
+    assert.equal(start.response.status_text, "Found");
+    assert.equal(start.response.url, "https://example.com/file");
+    assert.equal(start.response.body_unavailable, true);
+    assert.equal(start.response.headers.some(([name]) => name === "set-cookie"), false);
+    assert.equal(start.response.redirects, undefined);
+    assert.equal(start.body_bytes, stream ? null : 0);
+    if (stream) background.send("response_ack", { sequence: -1 });
+    await waitUntil(() => messages.at(-1).type === "response_end");
+    assert.equal(messages.length, 2, "no response body chunk should be sent");
+    assert.equal(messages.at(-1).chunks, 0);
+    if (stream) assert.equal(messages.at(-1).body_bytes, 0);
+    assert.equal(reads, 0);
+    assert.equal(cancelled, true);
+  });
+}
 
 test("buffered responses retain their 32 MiB limit", async () => {
   let lastMessage;
@@ -282,4 +317,56 @@ test("empty streaming responses finish with zero byte and chunk counts", async (
   await waitUntil(() => lastMessage.type === "response_end");
   assert.equal(lastMessage.body_bytes, 0);
   assert.equal(lastMessage.chunks, 0);
+});
+
+test("redirects precede streaming headers and never read an intermediate body", async () => {
+  let redirectsRead = 0;
+  const messages = [];
+  const background = streamingBackground(async url => url.endsWith("/file")
+    ? new Response(new ReadableStream({ type: "bytes", pull() { redirectsRead += 1; } }), { status: 302, headers: { Location: "/end" } })
+    : new Response(null, { status: 204 }), message => messages.push(message), { redirectsEnabled: true });
+  background.start(true, 30000, { follow_redirects: true });
+  await waitUntil(() => messages.length);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].type, "response_start");
+  assert.equal(messages[0].response.status, 204);
+  assert.equal(messages[0].response.redirected, true);
+  assert.equal(messages[0].response.redirects[0].to, "https://example.com/end");
+  assert.equal(redirectsRead, 0);
+  background.send("response_ack", { sequence: -1 });
+  await waitUntil(() => messages.some(message => message.type === "response_end"));
+});
+
+for (const action of ["disconnect", "timeout"]) {
+  test(`a pending redirect cannot advance after ${action}`, async () => {
+    let resolve;
+    let calls = 0;
+    const messages = [];
+    const background = streamingBackground(() => {
+      calls += 1;
+      return new Promise(done => { resolve = done; });
+    }, message => messages.push(message), { redirectsEnabled: true });
+    background.start(true, action === "timeout" ? 50 : 30000, { follow_redirects: true });
+    await waitUntil(() => calls === 1);
+    if (action === "disconnect") {
+      background.ports[0].drop();
+      vm.runInContext("connectNativeHost()", background.context);
+    } else await waitUntil(() => background.signal().aborted);
+    resolve(new Response(null, { status: 302, headers: { Location: "/end" } }));
+    await waitUntil(() => vm.runInContext("activeRequests.size", background.context) === 0);
+    assert.equal(calls, 1);
+    assert.equal(background.messages.length, 0);
+    assert.equal(vm.runInContext("bufferedRequestBytes", background.context), 0);
+    if (action === "timeout") assert.equal(messages.at(-1).error.code, "TIMEOUT");
+  });
+}
+
+test("redirect protocol fields are strictly validated before Fetch", async () => {
+  for (const fields of [{ follow_redirects: "true" }, { follow_redirects: null }, { max_redirects: -1 },
+    { max_redirects: 21 }, { max_redirects: null }, { max_redirects: true }, { max_redirects: "2" }]) {
+    const messages = [];
+    const background = streamingBackground(() => assert.fail("invalid request reached Fetch"), message => messages.push(message));
+    background.start(true, 30000, fields);
+    assert.equal(messages[0].error.code, "INVALID_REQUEST");
+  }
 });
