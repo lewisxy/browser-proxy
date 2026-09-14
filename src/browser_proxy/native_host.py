@@ -81,7 +81,7 @@ class NativeHost:
     ) -> None:
         metadata = {
             key: request[key]
-            for key in ("url", "method", "headers", "timeout_ms", "cache", "follow_redirects", "max_redirects")
+            for key in ("url", "method", "headers", "timeout_ms", "cache", "follow_redirects", "max_redirects", "tab")
             if key in request
         }
         with self.native_write_lock:
@@ -90,7 +90,7 @@ class NativeHost:
                 {
                     "protocol": PROTOCOL_NAME,
                     "version": PROTOCOL_VERSION,
-                    "type": "request_start",
+                    "type": "tab_request_start" if "tab" in request else "request_start",
                     "id": request_id,
                     "request": metadata,
                     "body_bytes": len(body),
@@ -296,7 +296,7 @@ class NativeHost:
         if (
             message.get("protocol") != PROTOCOL_NAME
             or message.get("version") != PROTOCOL_VERSION
-            or message.get("type") not in ("request", "request_stream")
+            or message.get("type") not in ("request", "request_stream", "request_tab", "request_tab_stream")
         ):
             raise ProtocolError("Unsupported local protocol envelope")
         request_id = message.get("id")
@@ -305,6 +305,9 @@ class NativeHost:
             raise ProtocolError("id must contain 1-128 safe ASCII characters")
         if not isinstance(request, dict):
             raise ProtocolError("request must be an object")
+        tab_mode = message["type"] in {"request_tab", "request_tab_stream"}
+        if tab_mode != ("tab" in request) or tab_mode and not isinstance(request["tab"], dict):
+            raise ProtocolError("Tab requests require a tab object and a request_tab/request_tab_stream envelope")
         body_value = request.get("body", {"encoding": "base64", "data": ""})
         if not isinstance(body_value, dict) or body_value.get("encoding") != "base64":
             raise ProtocolError("request.body must use base64 encoding")
@@ -379,7 +382,7 @@ class NativeHost:
             stream = connection.makefile("rwb", buffering=0)
             try:
                 message = read_local(stream)
-                streaming = message.get("type") == "request_stream"
+                streaming = message.get("type") in {"request_stream", "request_tab_stream"}
                 request_id, request, body, wait_seconds = self.decode_request(message)
                 pending = PendingResponse(streaming=streaming)
                 with self.pending_lock:

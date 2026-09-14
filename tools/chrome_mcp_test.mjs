@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { testProfileEditor } from "./profile_ui_test.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -70,6 +71,7 @@ fs.writeFileSync(
 
 let echoRequests = 0;
 let deniedRedirectRequests = 0;
+let tabApiRequests = 0;
 const redirectGates = new Map();
 const redirectHits = new Map();
 const deniedServer = http.createServer((_request, response) => {
@@ -78,6 +80,13 @@ const deniedServer = http.createServer((_request, response) => {
   response.end();
 });
 await new Promise(resolve => deniedServer.listen(0, "127.0.0.1", resolve));
+let pageAliasApiRequests = 0;
+const pageAliasServer = http.createServer((request, response) => {
+  if (request.url === "/") response.writeHead(302, { Location: `${baseUrl}/tab-app?alias-page-test=private#not-output` });
+  else if (request.url === "/api") pageAliasApiRequests++;
+  response.end();
+});
+await new Promise(resolve => pageAliasServer.listen(0, "127.0.0.1", resolve));
 const largeResponseBytes = 70 * 1024 * 1024 + 17;
 let resumeLargeResponse;
 
@@ -121,6 +130,40 @@ const server = http.createServer((request, response) => {
   request.on("data", (chunk) => chunks.push(chunk));
   request.on("end", () => {
     const parsed = new URL(request.url, "http://localhost");
+    if ([baseUrl, `http://127.0.0.1:${server.address().port}`].includes(request.headers.origin)) {
+      response.setHeader("Access-Control-Allow-Origin", request.headers.origin);
+      response.setHeader("Access-Control-Allow-Credentials", "true");
+      response.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CSRF, X-XSRF-TOKEN, X-Test");
+      response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE");
+      if (request.method === "OPTIONS") { response.writeHead(204); response.end(); return; }
+    }
+    if (parsed.pathname === "/tab-app") {
+      response.setHeader("Set-Cookie", "XSRF-TOKEN=cookie%2Bsecret; SameSite=Lax; Path=/");
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end('<!doctype html><title>Tab request fixture</title><meta name="csrf-token" content="dom-secret"><h1 id="ready">Tab ready</h1>');
+      return;
+    }
+    if (parsed.pathname === "/tab-bootstrap") {
+      response.setHeader("Content-Type", "application/json");
+      response.setHeader("X-CSRF", "bootstrap-secret");
+      response.end('{"security":{"token":"bootstrap-secret"}}');
+      return;
+    }
+    if (parsed.pathname === "/tab-api") {
+      tabApiRequests++;
+      const bytes = Buffer.concat(chunks);
+      let token = request.headers["x-csrf"] || request.headers["x-xsrf-token"];
+      if (parsed.searchParams.get("body") === "form") token = new URLSearchParams(bytes.toString()).get("csrf");
+      if (parsed.searchParams.get("body") === "json") token = JSON.parse(bytes.toString()).security?.csrf;
+      const expectedOrigin = parsed.searchParams.get("page") || `http://${request.headers.host}`;
+      const context = request.headers.origin === expectedOrigin && request.headers.referer?.startsWith(`${expectedOrigin}/`);
+      const csrf = token === (parsed.searchParams.get("source") === "cookie" ? "cookie+secret"
+        : parsed.searchParams.get("source") === "bootstrap" ? "bootstrap-secret" : "dom-secret");
+      response.setHeader("Content-Type", "application/json");
+      response.statusCode = context && csrf ? 200 : 403;
+      response.end(JSON.stringify({ context: Boolean(context), csrf, bodyBytes: bytes.length }));
+      return;
+    }
     if (["/r", "/r-cache", "/r-gated"].includes(parsed.pathname)) {
       redirectHits.set(request.url, (redirectHits.get(request.url) || 0) + 1);
       const send = () => {
@@ -166,6 +209,7 @@ const server = http.createServer((request, response) => {
           bodyBase64: Buffer.concat(chunks).toString("base64"),
           authorization: request.headers.authorization || "",
           contentType: request.headers["content-type"] || "",
+          csrfPresent: Boolean(request.headers["x-csrf"] || request.headers["x-xsrf-token"]),
         }),
       );
       return;
@@ -264,6 +308,12 @@ const results = {
   largeResponsePassed: false,
   incrementalOutputPassed: false,
   compressedStreamingPassed: false,
+  tabContextPassed: false,
+  tabCsrfPassed: false,
+  tabHelperPassed: false,
+  tabPageRedirectDiagnosticsPassed: false,
+  profileFormsPassed: false,
+  profileScreenshots: {},
   popupScreenshot: "",
   desktopScreenshot: "",
   mobileScreenshot: "",
@@ -528,7 +578,7 @@ try {
   assert(results.deniedOriginBlocked, "a non-allowlisted origin was not blocked");
 
   const echoCountBeforeRedirect = echoRequests;
-  const cliOptions = { encoding: "utf8", env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime } };
+  const cliOptions = { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, BROWSER_PROXY_RUNTIME_DIR: chromeRuntime } };
   const invoke = (...args) => execFileAsync(cli, ["--browser", "chrome", ...args], cliOptions);
   const rejectRedirect = async (code, ...args) => {
     await assert.rejects(invoke(...args), error => {
@@ -758,6 +808,153 @@ try {
   results.foregroundPageAdded = pagesAfter.structuredContent.pages.length !== beforeCount;
   assert.equal(results.foregroundPageAdded, false, "CLI request created a browser page");
 
+  // Page-context execution and CSRF are exercised on local synthetic pages only.
+  results.profileScreenshots = await testProfileEditor(call, resultText, optionsPage.id, baseUrl, otherOrigin, runtimeRoot);
+  results.profileFormsPassed = true;
+  const saveProfiles = async profiles => {
+    const saved = await call("evaluate_script", {
+      pageId: optionsPage.id,
+      function: `async () => {
+        document.querySelector('#tab-profiles-message').textContent = '';
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([${JSON.stringify(JSON.stringify({ version: 1, profiles }))}], 'profiles.json', {type: 'application/json'}));
+        const input = document.querySelector('#tab-profiles-file');
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('change', {bubbles: true}));
+        for (let i = 0; i < 100; i++) {
+          const message = document.querySelector('#tab-profiles-message').textContent;
+          if (message.startsWith('Imported and saved') && !document.querySelector('#tab-profile-controls').disabled) return {saved: true};
+          if (message.startsWith('Could not')) return {message};
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        return {saved: false};
+      }`,
+    });
+    assert.match(resultText(saved), /"saved":true/);
+  };
+  const domRule = { sources: [{ type: "dom", selector: 'meta[name="csrf-token"]', attribute: "content" }], target: { header: "X-CSRF" } };
+  const tabProfile = { name: "fixture", origin: baseUrl, page_url: `${baseUrl}/tab-app`, wait_for: "#ready", csrf: [domRule] };
+  await saveProfiles([tabProfile]);
+  const tabSetup = await call("evaluate_script", {
+    pageId: optionsPage.id,
+    function: `async () => {
+      window.tabBaseline = {active: (await chrome.tabs.query({active: true})).map(tab => tab.id)};
+      const tab = await chrome.tabs.create({url: ${JSON.stringify(`${baseUrl}/tab-app`)}, active: false});
+      window.tabFixtureId = tab.id;
+      while ((await chrome.tabs.get(tab.id)).status !== 'complete') await new Promise(resolve => setTimeout(resolve, 20));
+      window.tabBaseline.count = (await chrome.tabs.query({})).length;
+      return {ready: true};
+    }`,
+  });
+  assert.match(resultText(tabSetup), /"ready":true/);
+  await rejectRedirect("HTTP 403", "--fail", "--json", "{}", `${baseUrl}/tab-api`);
+  await rejectRedirect("HTTP 403", "--fail", "-H", "X-CSRF: dom-secret", "--json", "{}", `${baseUrl}/tab-api`);
+  const pageResponse = JSON.parse((await invoke("--tab", "--fail", "--json", "{}", `${baseUrl}/tab-api`)).stdout);
+  assert.deepEqual({ context: pageResponse.context, csrf: pageResponse.csrf }, { context: true, csrf: true });
+  await rejectRedirect("HTTP 403", "--tab", "--no-csrf", "--fail", "--json", "{}", `${baseUrl}/tab-api`);
+  const tabReuse = await call("evaluate_script", {
+    pageId: optionsPage.id,
+    function: `async () => ({sameCount: (await chrome.tabs.query({})).length === window.tabBaseline.count,
+      sameFocus: JSON.stringify((await chrome.tabs.query({active: true})).map(tab => tab.id)) === JSON.stringify(window.tabBaseline.active)})`,
+  });
+  assert.match(resultText(tabReuse), /"sameCount":true/);
+  assert.match(resultText(tabReuse), /"sameFocus":true/);
+  results.tabContextPassed = true;
+
+  for (const [rule, suffix, flags] of [
+    [{ sources: [{ type: "cookie", name: "XSRF-TOKEN" }], transforms: ["url-decode"], target: { header: "X-XSRF-TOKEN" } }, "?source=cookie", ["--json", "{}"]],
+    [{ sources: [{ type: "bootstrap", url: "/tab-bootstrap", json_path: ["security", "token"] }], target: { header: "X-CSRF" } }, "?source=bootstrap", ["--json", "{}"]],
+    [{ ...domRule, target: { form: "csrf" } }, "?body=form", ["-d", "value=42"]],
+    [{ ...domRule, target: { json_path: ["security", "csrf"] } }, "?body=json", ["--json", '{"value":42}']],
+  ]) {
+    await saveProfiles([{ ...tabProfile, csrf: [rule] }]);
+    const result = JSON.parse((await invoke("--tab-profile", "fixture", "--fail", ...flags, `${baseUrl}/tab-api${suffix}`)).stdout);
+    assert(result.context && result.csrf);
+  }
+  await saveProfiles([{ ...tabProfile, csrf: [{ ...domRule, sources: [{ type: "cookie", name: "missing-token" }] }] }]);
+  const beforeMissing = tabApiRequests;
+  await rejectRedirect("CSRF_TOKEN_UNAVAILABLE", "--tab", "--json", "{}", `${baseUrl}/tab-api`);
+  assert.equal(tabApiRequests, beforeMissing);
+  results.tabCsrfPassed = true;
+
+  // The application origin can differ from the API origin, with normal page CORS.
+  await saveProfiles([{ ...tabProfile, name: "cross-origin", origin: otherOrigin }]);
+  const crossOrigin = JSON.parse((await invoke("--tab-profile", "cross-origin", "--fail", "--json", "{}",
+    `${otherOrigin}/tab-api?page=${encodeURIComponent(baseUrl)}`)).stdout);
+  assert(crossOrigin.context && crossOrigin.csrf);
+
+  await saveProfiles([tabProfile, { ...tabProfile, name: "helper", origin: otherOrigin, page_url: `${otherOrigin}/tab-app` }]);
+  await rejectRedirect("TAB_NOT_FOUND", "--tab-existing-only", `${otherOrigin}/echo`);
+  const helpers = await Promise.all(Array.from({ length: 3 }, () => invoke("--tab", "--fail", "--json", "{}", `${otherOrigin}/tab-api`)));
+  assert(helpers.every(result => JSON.parse(result.stdout).csrf));
+  const helperState = await call("evaluate_script", {
+    pageId: optionsPage.id,
+    function: `async () => {
+      const tabs = (await chrome.tabs.query({})).filter(tab => tab.url === ${JSON.stringify(`${otherOrigin}/tab-app`)});
+      return {count: tabs.length, inactive: tabs.every(tab => !tab.active), muted: tabs.every(tab => tab.mutedInfo.muted),
+        sameFocus: JSON.stringify((await chrome.tabs.query({active: true})).map(tab => tab.id)) === JSON.stringify(window.tabBaseline.active)};
+    }`,
+  });
+  assert.match(resultText(helperState), /"count":1/);
+  assert.match(resultText(helperState), /"inactive":true/);
+  assert.match(resultText(helperState), /"muted":true/);
+  assert.match(resultText(helperState), /"sameFocus":true/);
+  results.tabHelperPassed = true;
+
+  await setRedirects(true);
+  const tabRedirect = JSON.parse((await invoke("--tab", "--response-json", route(denied))).stdout);
+  assert.equal(tabRedirect.response.status, 302);
+  assert.equal(tabRedirect.response.body_unavailable, true);
+  assert.equal(tabRedirect.response.body.data, "");
+  await rejectRedirect("REDIRECT_NOT_ALLOWED", "--tab", "-L", route(denied));
+  assert.equal(deniedRedirectRequests, 0);
+  const tabChain = JSON.parse((await invoke("--tab", "-L", "--json", "{}", route(`${otherOrigin}/echo`, 307))).stdout);
+  assert.equal(tabChain.csrfPresent, false, "generated CSRF header crossed origins");
+  const tabBinary = path.join(runtimeRoot, "tab-upload.bin");
+  try {
+    const bytes = Buffer.alloc(800000, 0xa5);
+    fs.writeFileSync(tabBinary, bytes);
+    const uploaded = JSON.parse((await invoke("--tab", "--data-binary", `@${tabBinary}`, `${baseUrl}/echo`)).stdout);
+    assert(Buffer.from(uploaded.bodyBase64, "base64").equals(bytes));
+  } finally { fs.rmSync(tabBinary, { force: true }); }
+  await invoke("--tab", "--max-time", "120", "-o", largeResponseFile, `${baseUrl}/large-gzip`);
+  await assertLargeFile(largeResponseFile);
+  fs.rmSync(largeResponseFile, { force: true });
+
+  // Like an apex-to-www redirect, the helper navigation changes the application
+  // origin before any API request. Both origins can already be authorized.
+  const aliasOrigin = `http://127.0.0.1:${pageAliasServer.address().port}`;
+  const closeAliasHelpers = async () => call("evaluate_script", {
+    pageId: optionsPage.id,
+    function: `async () => {
+      const tabs = (await chrome.tabs.query({})).filter(tab => tab.url?.startsWith(${JSON.stringify(`${baseUrl}/tab-app?alias-page-test=`)}));
+      if (tabs.length) await chrome.tabs.remove(tabs.map(tab => tab.id));
+      return {closed: tabs.length};
+    }`,
+  });
+  for (const allowed of [true, false]) {
+    await setRules(allowed ? [...redirectRules, aliasOrigin] : [aliasOrigin]);
+    for (const enabled of [false, true]) {
+      await setRedirects(enabled);
+      for (const flags of [[], ["-L"]]) {
+        await assert.rejects(invoke("--tab", "--response-json", ...flags, "--json", "{}", `${aliasOrigin}/api`), failure => {
+          const result = JSON.parse(failure.stdout);
+          assert.equal(result.error.code, "TAB_ORIGIN_MISMATCH");
+          assert.deepEqual(result.error.details, { expected_origin: aliasOrigin, actual_origin: baseUrl, actual_origin_allowed: allowed });
+          assert(result.error.message.includes(aliasOrigin) && result.error.message.includes(baseUrl));
+          assert.equal(result.error.message.includes("extension allowlist"), !allowed);
+          assert(!JSON.stringify(result).includes("alias-page-test"), "page query leaked into diagnostics");
+          return true;
+        });
+        await closeAliasHelpers();
+      }
+    }
+  }
+  assert.equal(pageAliasApiRequests, 0, "mismatched page setup issued the API request");
+  await setRules(redirectRules);
+  assert.match((await invoke("--tab", "--fail", `${baseUrl}/tab-app`)).stdout, /Tab request fixture/);
+  results.tabPageRedirectDiagnosticsPassed = true;
+
   fs.writeFileSync(
     path.join(runtimeRoot, "chrome-mcp-results.json"),
     `${JSON.stringify(results, null, 2)}\n`,
@@ -767,8 +964,10 @@ try {
   await client.close().catch(() => {});
   server.closeAllConnections();
   deniedServer.closeAllConnections();
+  pageAliasServer.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
   await new Promise((resolve) => deniedServer.close(resolve));
+  await new Promise((resolve) => pageAliasServer.close(resolve));
   fs.rmSync(profileNativeManifest, { force: true });
   fs.rmSync(largeResponseFile, { force: true });
 }

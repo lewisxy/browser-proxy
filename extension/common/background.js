@@ -20,6 +20,7 @@ const forbiddenHeaders = new Set([
 ]);
 const cacheModes = new Set(["default", "no-store", "reload", "no-cache", "force-cache"]);
 const fetchHop = BrowserProxyRedirectObserver.create(extensionApi);
+let tabContext;
 
 let nativePort = null;
 let nativeReady = false;
@@ -63,6 +64,9 @@ function validateRequestStart(message) {
     throw new Error("url must be a string no longer than 16384 characters");
   }
   BrowserProxyPolicy.parseRequestUrl(request.url);
+  const inTab = message.type === "tab_request_start";
+  if (inTab !== (request.tab !== undefined)) throw new Error("Tab options require tab_request_start");
+  if (inTab) BrowserProxyTabSettings.request(request.tab);
 
   const method = String(request.method || "GET").toUpperCase();
   if (!/^[!#$%&'*+.^_`|~0-9A-Z-]+$/.test(method) || ["CONNECT", "TRACE", "TRACK"].includes(method)) {
@@ -126,6 +130,7 @@ function validateRequestStart(message) {
     streamResponse: message.stream_response === true,
     follow_redirects: request.follow_redirects === true,
     max_redirects: maxRedirects,
+    ...(inTab ? { tab: request.tab } : {}),
   };
 }
 
@@ -301,14 +306,19 @@ async function executeRequest(id, state) {
   const active = { port, controller };
   activeRequests.set(id, active);
   let timedOut = false;
+  let tabSession;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, request.timeout_ms);
   try {
     const body = joinChunks(state.chunks, state.receivedBytes);
+    if (request.tab) {
+      tabContext ??= BrowserProxyTabContext.create(extensionApi);
+      tabSession = await tabContext.open(request, controller.signal);
+    }
     const { response, history } = await BrowserProxyRedirects.execute(
-      request, body, controller.signal, storageGet, fetchHop,
+      request, body, controller.signal, storageGet, tabSession?.fetchHop || fetchHop,
     );
     if (request.streamResponse) {
       await streamSuccess(id, response, active, history);
@@ -329,6 +339,7 @@ async function executeRequest(id, state) {
   } finally {
     clearTimeout(timer);
     controller.abort();
+    tabSession?.release();
     bufferedRequestBytes -= state.receivedBytes;
     if (activeRequests.get(id) === active) {
       activeRequests.delete(id);
@@ -383,7 +394,7 @@ function handleNativeMessage(message, port) {
     return;
   }
 
-  if (message.type === "request_start") {
+  if (message.type === "request_start" || message.type === "tab_request_start") {
     if (incomingRequests.has(message.id) || activeRequests.has(message.id)) {
       sendError(message.id, "INVALID_REQUEST", "A request with this id already exists", null, port);
       return;

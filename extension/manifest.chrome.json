@@ -10,7 +10,7 @@
     "128": "icons/icon-128.png"
   },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm7XPelzQCwXavG+XNYsZszJdDyRF+xEhV7vOzxZxEOoUKvI4yyNm474LomYgUOLRmOcLPO/idNGv4rTzTrMDAdWDgb364v+Sc/qTYl52yx/wHhktxAQSkySQJITtz/RQROwFdbbaOEp6wuOCa+wuX4dKsS3J/7+S9ijzrm8TNVBCXPGtX3h/KHr3no8h329qWs4AlqREaXBfiRXIC0pwWcj7VOu72KDtAQPUn7Ha/MXNI6mV7D6QadUVSJjjpjz3BCGNFjhope92MvWiHbkE8ZBl5alikZakjwbJfa0GaaJntASmMHiN1YTt9Ucwvpxix5quI9yLPWmSvNsXBVTtdQIDAQAB",
-  "permissions": ["activeTab", "nativeMessaging", "storage", "webRequest"],
+  "permissions": ["activeTab", "nativeMessaging", "storage", "webRequest", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background-loader.js"

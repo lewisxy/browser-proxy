@@ -27,6 +27,8 @@ body {
 }
 
 button,
+input,
+select,
 textarea {
   font: inherit;
 }
@@ -166,6 +168,290 @@ textarea {
 
 textarea:focus {
   box-shadow: 0 0 0 3px rgba(217, 75, 50, 0.25);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.editor-controls {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+#tab-profiles-section p,
+.profile-guide li {
+  line-height: 1.5;
+}
+
+.profile-guide {
+  border-left: 3px solid var(--green);
+  padding: 2px 0 2px 18px;
+  margin: 20px 0;
+}
+
+.profile-guide ol {
+  padding-left: 20px;
+}
+
+.profile-guide li + li {
+  margin-top: 8px;
+}
+
+.profile-guide p {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.tab-profile {
+  border: 1px solid var(--line);
+  margin-bottom: 16px;
+  background: var(--panel);
+}
+
+.tab-profile > summary {
+  padding: 16px;
+  cursor: pointer;
+}
+
+.profile-title {
+  font-size: 22px;
+  overflow-wrap: anywhere;
+}
+
+.profile-address {
+  display: block;
+  margin: 5px 0 0 20px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.profile-body {
+  border-top: 1px solid var(--line);
+  padding: 20px;
+}
+
+.profile-fields,
+.token-mapping {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+}
+
+.profile-fields > .form-field:last-child {
+  grid-column: 1 / -1;
+}
+
+.form-field {
+  min-width: 0;
+  margin-bottom: 16px;
+}
+
+.form-field input,
+.form-field select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  background: #fff;
+  color: var(--ink);
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.form-field input:focus-visible,
+.form-field select:focus-visible,
+summary:focus-visible,
+button:focus-visible {
+  outline: 3px solid var(--green);
+  outline-offset: 2px;
+}
+
+.form-field input:user-invalid {
+  border-color: var(--signal);
+}
+
+.field-help {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 7px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.profile-command {
+  display: block;
+  margin: 0 0 16px;
+  color: var(--green);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.editor-advanced {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin: 16px 0;
+}
+
+.editor-advanced > summary {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.token-heading {
+  font-size: 24px;
+  font-weight: 500;
+  margin: 24px 0 12px;
+}
+
+.token-rule {
+  border-top: 2px solid var(--ink);
+  margin: 18px 0;
+  padding-top: 14px;
+  min-width: 0;
+}
+
+.editor-heading,
+.add-rule-row,
+.token-adjustment {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.editor-heading h4 {
+  margin: 5px 0;
+  font-size: 18px;
+}
+
+.editor-advanced h5 {
+  font-size: 15px;
+  margin: 20px 0 8px;
+}
+
+.token-source,
+.token-target,
+.method-options {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+.token-source legend,
+.token-target legend,
+.method-options legend,
+.path-editor legend {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.fallback-sources > .token-source {
+  border-left: 2px solid var(--line);
+  margin-top: 16px;
+  padding: 0 0 4px 14px;
+}
+
+.path-editor {
+  min-width: 0;
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+}
+
+.path-level {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.path-level .form-field {
+  margin: 0;
+}
+
+.item-actions,
+.method-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.method-choices {
+  gap: 8px 18px;
+}
+
+.method-choices .checkbox-label {
+  margin: 0;
+}
+
+.token-adjustments,
+.method-options {
+  margin-top: 16px;
+}
+
+.token-adjustment > .form-field,
+.add-rule-row > .form-field {
+  flex: 1 1 220px;
+  margin: 0;
+}
+
+.add-rule-row {
+  align-items: end;
+}
+
+.rule-advanced > .form-field {
+  margin-top: 20px;
+}
+
+.compact {
+  font-size: 12px;
+  padding: 8px 10px;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.form-error {
+  color: #a52c20;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.form-error:empty {
+  display: none;
+}
+
+.empty-profiles,
+.empty-rules {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.profile-footer,
+.profile-actions {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+  margin-top: 20px;
 }
 
 .checkbox-label {
@@ -353,13 +639,19 @@ button:active {
   }
 
   .intro,
-  .fact-grid {
+  .fact-grid,
+  .profile-fields,
+  .token-mapping {
     grid-template-columns: 1fr;
     gap: 18px;
   }
 
   .panel {
     padding: 19px;
+  }
+
+  .profile-body {
+    padding: 14px;
   }
 
   .syntax-grid {

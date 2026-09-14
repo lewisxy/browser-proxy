@@ -33,6 +33,76 @@ function createPort() {
   };
 }
 
+test("Firefox manifest startup registers valid webRequest listeners and supports native reconnect", async () => {
+  const extensionDirectory = path.join(__dirname, "..", "extension");
+  const manifest = JSON.parse(fs.readFileSync(path.join(extensionDirectory, "manifest.firefox.json"), "utf8"));
+  const registrations = new Map();
+  const ports = [createPort(), createPort()];
+  let nextPort = 0;
+  let runtimeMessageListener;
+  const browser = {
+    runtime: {
+      getManifest: () => manifest,
+      getURL: resource => `moz-extension://test/${resource}`,
+      connectNative(name) {
+        assert.equal(name, "com.browserproxy.native");
+        assert.equal(typeof runtimeMessageListener, "function");
+        return ports[nextPort++];
+      },
+      onMessage: { addListener(listener) { runtimeMessageListener = listener; } },
+    },
+    storage: { local: { get: async defaults => defaults } },
+    webRequest: Object.fromEntries([
+      "onBeforeRequest", "onHeadersReceived", "onBeforeRedirect", "onCompleted", "onErrorOccurred",
+    ].map(name => [name, {
+      addListener(...args) {
+        // Firefox's onErrorOccurred schema has only listener and filter: even
+        // an explicitly passed undefined is an unsupported third argument.
+        const maximum = name === "onErrorOccurred" ? 2 : 3;
+        if (args.length < 2 || args.length > maximum) {
+          throw new TypeError(`Incorrect argument types for webRequest.${name}.addListener`);
+        }
+        assert.equal(typeof args[0], "function");
+        assert.deepEqual(Array.from(args[1].types), ["xmlhttprequest"]);
+        if (args.length === 3 && args[2] !== undefined) assert(Array.isArray(args[2]));
+        registrations.set(name, args);
+      },
+    }])),
+  };
+  const context = vm.createContext({
+    browser, AbortController,
+    fetch: () => assert.fail("startup must not issue HTTP requests"),
+    setTimeout: (...args) => setTimeout(...args).unref(), clearTimeout,
+  });
+  // Exercise the actual manifest load order and observer, not a stubbed create().
+  for (const script of manifest.background.scripts) {
+    vm.runInContext(fs.readFileSync(path.join(extensionDirectory, "common", script), "utf8"), context, { filename: script });
+  }
+  assert.equal(nextPort, 1);
+  assert.equal(registrations.size, 5);
+  assert.deepEqual(Array.from(registrations.get("onBeforeRequest")[2]), ["blocking"]);
+  for (const name of ["onHeadersReceived", "onBeforeRedirect"]) {
+    assert.deepEqual(Array.from(registrations.get(name)[2]), ["responseHeaders"]);
+  }
+  assert.equal(registrations.get("onErrorOccurred").length, 2);
+
+  const status = () => new Promise(resolve => {
+    assert.equal(runtimeMessageListener({ type: "get_status" }, {}, resolve), true);
+  });
+  const ready = { protocol: "browser-proxy", version: 1, type: "host_ready" };
+  assert.equal((await status()).connected, false);
+  ports[0].receive(ready);
+  assert.equal((await status()).connected, true);
+  const reconnected = await new Promise(resolve => {
+    assert.equal(runtimeMessageListener({ type: "reconnect_native" }, {}, resolve), false);
+  });
+  assert.equal(reconnected.accepted, true);
+  assert.equal(nextPort, 2);
+  assert.equal((await status()).connected, false);
+  ports[1].receive(ready);
+  assert.equal((await status()).connected, true);
+});
+
 test("reports ready only for the current native port", async () => {
   const ports = [createPort(), createPort()];
   let nextPort = 0;
@@ -134,6 +204,7 @@ function streamingBackground(response, onMessage = () => {}, settings = {}) {
       storage: { local: { get: async defaults => ({ ...defaults, allowlist: ["https://example.com"], ...settings }) } },
     },
     BrowserProxyPolicy: require("../extension/common/policy.js"),
+    BrowserProxyTabSettings: require("../extension/common/tab-settings.js"),
     BrowserProxyRedirectObserver: { create: () => async (url, init) => ({ response: await context.fetch(url, init) }) },
     AbortController, Headers, Uint8Array, URL, atob, btoa,
     setTimeout: (...args) => setTimeout(...args).unref(),
@@ -170,6 +241,18 @@ async function waitUntil(predicate) {
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
 }
+
+test("tab metadata cannot use a legacy start or inject inline policy settings", async () => {
+  for (const [type, tab] of [["request_start", {}], ["tab_request_start", undefined],
+    ["tab_request_start", { allowlist: ["*://*"] }], ["tab_request_start", { csrf: "true" }]]) {
+    const messages = [];
+    const background = streamingBackground(() => assert.fail("invalid tab request was fetched"), message => messages.push(message));
+    background.send(type, { request: { url: "https://example.com/api", ...(tab === undefined ? {} : { tab }) }, body_bytes: 0 });
+    background.send("request_end", { chunks: 0 });
+    assert.equal(messages[0].error.code, "INVALID_REQUEST");
+    assert.equal(vm.runInContext("activeRequests.size", background.context), 0);
+  }
+});
 
 test("streaming reads bounded chunks only after downstream acknowledgements", async () => {
   const chunkBytes = 384 * 1024;

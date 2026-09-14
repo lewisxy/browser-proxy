@@ -43,6 +43,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--compressed", action="store_true", help="Accept browser-managed response compression")
     result.add_argument("-L", "--location", action="store_true", help="Follow allowlisted redirects when enabled in extension settings")
     result.add_argument("--max-redirs", type=int, default=20, metavar="N", help="Maximum redirects with -L (0 through 20; default: 20)")
+    result.add_argument("--tab", action="store_true", help="Fetch in a matching website tab; create an inactive helper if needed")
+    result.add_argument("--tab-url", metavar="URL", help="Application page to match/open (implies --tab)")
+    result.add_argument("--tab-id", type=int, metavar="ID", help="Use a specific open browser tab (implies --tab)")
+    result.add_argument("--tab-profile", metavar="NAME", help="Use a browser-configured page/CSRF profile (implies --tab)")
+    result.add_argument("--tab-existing-only", action="store_true", help="Require a matching open tab; never create one (implies --tab)")
+    result.add_argument("--no-csrf", action="store_true", help="Disable automatic CSRF injection for this tab request")
     result.add_argument("-i", "--include", action="store_true", help="Include response status and headers")
     result.add_argument("-D", "--dump-header", metavar="FILE", help="Write response status and headers to a file")
     result.add_argument("-o", "--output", metavar="FILE", help="Write response body to a file")
@@ -141,6 +147,23 @@ def append_query(url: str, values: list[bytes]) -> str:
 
 
 def build_request(arguments: argparse.Namespace) -> dict[str, Any]:
+    tab_mode = arguments.tab or arguments.tab_url is not None or arguments.tab_id is not None or arguments.tab_profile is not None or arguments.tab_existing_only
+    if arguments.no_csrf and not tab_mode:
+        raise ValueError("--no-csrf requires a tab request")
+    if arguments.tab_id is not None and arguments.tab_id < 0:
+        raise ValueError("--tab-id must be a nonnegative integer")
+    if arguments.tab_url is not None:
+        page = urlsplit(arguments.tab_url)
+        if page.scheme not in {"http", "https"} or not page.hostname or page.username is not None or page.password is not None:
+            raise ValueError("--tab-url must be an absolute HTTP(S) URL without credentials")
+    tab = {}
+    for key, value in (("url", arguments.tab_url), ("id", arguments.tab_id), ("profile", arguments.tab_profile)):
+        if value is not None:
+            tab[key] = value
+    if arguments.tab_existing_only:
+        tab["existing_only"] = True
+    if arguments.no_csrf:
+        tab["csrf"] = False
     headers = parse_headers(arguments.header)
     body_sources = bool(arguments.data or arguments.data_raw or arguments.data_binary or arguments.data_urlencode)
     selected_types = sum((body_sources, arguments.json is not None, bool(arguments.form)))
@@ -194,6 +217,7 @@ def build_request(arguments: argparse.Namespace) -> dict[str, Any]:
         "cache": "no-cache" if arguments.no_cache else "default",
         "follow_redirects": arguments.location,
         "max_redirects": arguments.max_redirs,
+        **({"tab": tab} if tab_mode else {}),
     }
 
 
@@ -316,7 +340,7 @@ def main() -> int:
     message = {
         "protocol": PROTOCOL_NAME,
         "version": PROTOCOL_VERSION,
-        "type": "request" if arguments.response_json else "request_stream",
+        "type": ("request_tab" if "tab" in request else "request") + ("" if arguments.response_json else "_stream"),
         "id": request_id,
         "request": request,
     }

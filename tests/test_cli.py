@@ -21,6 +21,25 @@ class CliRequestTests(unittest.TestCase):
         self.assertEqual(request["method"], "POST")
         self.assertIn(["Content-Type", "application/x-www-form-urlencoded"], request["headers"])
 
+    def test_tab_options_are_explicit_and_preserve_browser_side_configuration(self) -> None:
+        self.assertNotIn("tab", build_request(self.parse()))
+        self.assertEqual(build_request(self.parse("--tab"))["tab"], {})
+        request = build_request(self.parse("--tab-url", "https://app.example.com/start", "--tab-id", "4",
+                                           "--tab-profile", "app", "--tab-existing-only", "--no-csrf"))
+        self.assertEqual(request["tab"], {"url": "https://app.example.com/start", "id": 4,
+                                         "profile": "app", "existing_only": True, "csrf": False})
+        for flags in [("--no-csrf",), ("--tab-id", "-1"), ("--tab-url", "javascript:alert(1)"),
+                      ("--tab-url", "https://user:password@example.com")]:
+            with self.assertRaises(ValueError):
+                build_request(self.parse(*flags))
+
+    def test_buffered_tab_cli_uses_a_distinct_envelope_for_older_host_compatibility(self) -> None:
+        with patch("sys.argv", ["browser-proxy", "--tab", "--response-json", "https://example.com"]), \
+                patch("browser_proxy.cli.exchange_local", return_value={"ok": True}) as exchange, \
+                patch("sys.stdout", io.StringIO()):
+            self.assertEqual(main(), 0)
+            self.assertEqual(exchange.call_args.args[0]["type"], "request_tab")
+
     def test_json_file_and_custom_header(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "request.json"

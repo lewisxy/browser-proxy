@@ -20,7 +20,7 @@
     );
   }
 
-  function create(api, fetchRequest = root.fetch.bind(root)) {
+  function create(api, fetchRequest = root.fetch.bind(root), ownsRequest) {
     const pending = new Map();
     const requests = new Map();
     let extensionEvents = 0;
@@ -30,8 +30,18 @@
     // Firefox can additionally stop an unexpected internal rewrite before it is
     // sent. Chrome MV3 uses nonblocking observation and manual Fetch redirects.
     const blocking = api.runtime.getManifest().manifest_version === 2;
+    const listeners = [];
+
+    function listen(event, listener, extra) {
+      // Firefox's onErrorOccurred accepts only listener and filter. An explicit
+      // undefined still counts as a third argument and aborts background startup.
+      if (extra === undefined) event.addListener(listener, filter);
+      else event.addListener(listener, filter, extra);
+      listeners.push([event, listener]);
+    }
 
     function owned(details) {
+      if (ownsRequest) return ownsRequest(details);
       const initiator = details.initiator ?? details.originUrl ?? details.documentUrl;
       return initiator === extensionOrigin || initiator?.startsWith(extensionRoot);
     }
@@ -93,7 +103,7 @@
       };
     }
 
-    api.webRequest.onBeforeRequest.addListener((details) => {
+    listen(api.webRequest.onBeforeRequest, (details) => {
       const state = stateForEvent(details);
       if (!state) return;
       if (details.url !== state.url || details.method !== state.method ||
@@ -104,9 +114,9 @@
       }
       state.requestId = details.requestId;
       requests.set(details.requestId, state);
-    }, filter, blocking ? ["blocking"] : []);
+    }, blocking ? ["blocking"] : []);
 
-    api.webRequest.onHeadersReceived.addListener((details) => {
+    listen(api.webRequest.onHeadersReceived, (details) => {
       const state = stateForEvent(details);
       if (!state) return;
       if (details.url !== state.url) {
@@ -125,9 +135,9 @@
         }
       }
       if (state.invalid) state.notify();
-    }, filter, ["responseHeaders"]);
+    }, ["responseHeaders"]);
 
-    api.webRequest.onBeforeRedirect.addListener((details) => {
+    listen(api.webRequest.onBeforeRedirect, (details) => {
       const state = stateForEvent(details);
       if (!state) return;
       if (details.url !== state.url) {
@@ -152,16 +162,16 @@
         }
       }
       state.notify();
-    }, filter, ["responseHeaders"]);
+    }, ["responseHeaders"]);
 
     for (const event of [api.webRequest.onCompleted, api.webRequest.onErrorOccurred]) {
-      event.addListener((details) => {
+      listen(event, (details) => {
         const state = stateForEvent(details);
         if (state) state.notify();
-      }, filter);
+      });
     }
 
-    return async function fetchHop(url, init, observe) {
+    async function fetchHop(url, init, observe) {
       if (!observe) return { response: await fetchRequest(url, init) };
       const tagged = new URL(url);
       // Fragments are visible to webRequest but never sent over HTTP or used in
@@ -233,7 +243,11 @@
         pending.delete(state.tag);
         if (state.requestId) requests.delete(state.requestId);
       }
+    }
+    fetchHop.dispose = () => {
+      for (const [event, listener] of listeners) event.removeListener(listener);
     };
+    return fetchHop;
   }
 
   root.BrowserProxyRedirectObserver = { create };

@@ -1,6 +1,6 @@
 # Browser Proxy
 
-Browser Proxy lets a local application make allowlisted HTTP requests through a user's Firefox or Chrome session. The browser performs each request with `credentials: "include"`, so HttpOnly cookies remain inside the browser and are never copied into the command-line process. Requests run in the extension background and do not create tabs.
+Browser Proxy lets a local application make allowlisted HTTP requests through a user's Firefox or Chrome session. The browser performs each request with `credentials: "include"`, so HttpOnly cookies remain inside the browser and are never copied into the command-line process. Requests run in the extension background by default. Opt-in tab mode uses a website's page context and can inject browser-side CSRF tokens.
 
 The project contains:
 
@@ -82,6 +82,22 @@ Turn on **Enable redirects** in extension settings (off by default), allow every
 
 The extension checks the latest allowlist before every hop, including same-origin redirects. The default limit is 20 redirects and `--max-time` covers the complete chain and download. Missing browser redirect metadata stops the request rather than following an unchecked destination. See [redirect behavior](docs/user-guide.md#redirects).
 
+### Website Context And CSRF
+
+For APIs that require the website's Origin/Referer or a CSRF token, use a matching open tab or an inactive helper tab:
+
+```sh
+.venv/bin/browser-proxy --tab https://example.com/api/profile
+.venv/bin/browser-proxy --tab-url https://app.example.com/ --json '{"name":"Ada"}' https://api.example.com/items
+.venv/bin/browser-proxy --tab-profile my-app --tab-existing-only --json '{}' https://api.example.com/action
+```
+
+Configure **Tab and CSRF profiles** with the settings-page forms: add a profile, enter the website addresses, choose a common token setup, and save. Presets cover common XSRF cookies, Django, page meta tags, and hidden form inputs. **More token options** exposes fallback sources, decoding order, prefixes, and method filters. Cookie, DOM, and token-endpoint sources can populate headers, form fields, or nested JSON fields. JSON import/export remains available for sharing profiles. Tokens are resolved inside the browser for each applicable hop. Both application and API origins must be allowlisted.
+
+Helpers are inactive and muted, are shared across concurrent requests, and close after 60 seconds idle. Activating a helper makes it user-owned. Page-context requests use ordinary website CORS and referrer behavior; service-worker-controlled pages are rejected to preserve manual redirect enforcement. Update the CLI, host, and extension together. See [tab-context requests and configuration examples](docs/user-guide.md#tab-context-requests).
+
+Use the site's final application URL in tab mode. An apex-to-`www` page redirect changes the expected tab origin even if a wildcard allowlist authorizes both hosts; `-L` controls API redirects after tab setup. `TAB_ORIGIN_MISMATCH` reports the expected and actual page origins. See [helper-page redirects](docs/user-guide.md#helper-page-redirects).
+
 ## Security Summary
 
 - The allowlist is empty by default and can only be changed in extension UI.
@@ -118,6 +134,18 @@ BROWSER_PROXY_LIVE_REDIRECT_URL=https://google.com/ npm run test:chrome
 ```
 
 The live probe only allows the initial origin and requests headers without following. The regular suite uses local fixtures and does not depend on this optional endpoint.
+
+## Package For Browser Stores
+
+Build unsigned store upload ZIPs with:
+
+```sh
+npm run package:extensions
+```
+
+Upload `dist/packages/browser-proxy-chrome-VERSION.zip` to the Chrome Web Store or `dist/packages/browser-proxy-firefox-VERSION.zip` to Mozilla for signing. Versions come from the source manifests.
+
+The Chrome ZIP omits the development-only `key` field rejected by the Web Store. Unpacked builds retain it for their stable development ID. Register the native host with the actual Web Store extension ID when installing the published extension. See [store packaging and signing](docs/user-guide.md#store-packaging-and-signing).
 
 ## Uninstall
 

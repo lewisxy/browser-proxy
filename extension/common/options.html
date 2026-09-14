@@ -65,8 +65,42 @@
         <div id="redirects-message" class="message" role="status" aria-live="polite"></div>
       </section>
 
+      <section class="panel" id="tab-profiles-section">
+        <div class="section-heading">
+          <div>
+            <p class="step">03 / Website context</p>
+            <h2>Tab and CSRF profiles</h2>
+          </div>
+          <span id="tab-profile-count" class="counter">0 profiles</span>
+        </div>
+        <p>Profiles let Browser Proxy use your website tab and attach the security token (CSRF) required by some APIs.</p>
+        <div class="profile-guide">
+          <ol>
+            <li><strong>Add a profile.</strong> Enter the API address and the page you use after login. Allow both above.</li>
+            <li><strong>Add a token rule if needed.</strong> Pick a common setup and check its names against the site’s instructions.</li>
+            <li><strong>Save profiles</strong>, then run <code>browser-proxy --tab-profile NAME URL</code>.</li>
+          </ol>
+          <p>Enter token <strong>names</strong>, not values; fresh values are read in the browser. Ask the site’s API maintainer if you don’t know its names.</p>
+        </div>
+        <form id="tab-profiles-form" novalidate>
+          <fieldset id="tab-profile-controls" class="editor-controls" disabled>
+            <legend class="visually-hidden">Website profiles</legend>
+            <div id="tab-profiles" class="profile-list"></div>
+            <button id="add-tab-profile" class="secondary" type="button">Add profile</button>
+            <div class="actions profile-actions">
+              <button id="save-tab-profiles" class="primary" type="submit">Save profiles</button>
+              <button id="import-tab-profiles" class="secondary" type="button">Import JSON</button>
+              <button id="export-tab-profiles" class="secondary" type="button">Export JSON</button>
+              <input id="tab-profiles-file" type="file" accept="application/json,.json" hidden />
+            </div>
+          </fieldset>
+        </form>
+        <p class="transfer-note">Changes take effect when saved. Import replaces profiles after validation; export uses saved profiles. Neither changes the allowlist.</p>
+        <div id="tab-profiles-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
       <section class="panel facts">
-        <p class="step">03 / Fixed safeguards</p>
+        <p class="step">04 / Fixed safeguards</p>
         <div class="fact-grid">
           <div><strong>Credentials</strong><span>Browser-managed, always included</span></div>
           <div><strong>Redirect destinations</strong><span>Authorized before each hop</span></div>
@@ -77,6 +111,8 @@
     </main>
     <script src="policy.js"></script>
     <script src="allowlist-file.js"></script>
+    <script src="tab-settings.js"></script>
+    <script src="tab-profile-editor.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

@@ -22,7 +22,7 @@ IDs must contain 1 to 128 ASCII letters, digits, dots, underscores, colons, or h
 
 ## Local Socket Transport
 
-The socket is an AF_UNIX stream. Each message is prefixed by one unsigned 32-bit **big-endian** length followed by exactly that many JSON bytes. One connection carries one request and its response, then closes. The original `request` mode returns one buffered response frame. The additive `request_stream` mode returns multiple response frames and requires acknowledgements. The request and buffered-response maximum frame is 64 MiB; streaming response frames are at most 1 MiB and acknowledgement frames at most 1 KiB.
+The socket is an AF_UNIX stream. Each message is prefixed by one unsigned 32-bit **big-endian** length followed by exactly that many JSON bytes. One connection carries one request and its response, then closes. The original `request` mode returns one buffered response frame. The additive `request_stream` mode returns multiple response frames and requires acknowledgements. Tab-context equivalents are `request_tab` and `request_tab_stream`. The request and buffered-response maximum frame is 64 MiB; streaming response frames are at most 1 MiB and acknowledgement frames at most 1 KiB.
 
 Default endpoints are `<runtime>/chrome.sock` and `<runtime>/firefox.sock`. For this `.venv`, `<runtime>` is `<project>/.browser-proxy/run`. Set `BROWSER_PROXY_RUNTIME_DIR` for a custom deployment or let the CLI use `--socket`.
 
@@ -63,8 +63,51 @@ Request fields:
 | `cache` | no | `default`, `no-store`, `reload`, `no-cache`, or `force-cache` |
 | `follow_redirects` | no | Boolean, default `false`; requests allowlisted following only when enabled in extension UI |
 | `max_redirects` | no | Integer from 0 through 20, default 20; maximum number of followed hops |
+| `tab` | tab modes only | Required object for `request_tab`/`request_tab_stream`; forbidden in background request envelopes |
 
-Clients cannot choose credentials, raw Fetch redirect mode, browser profile, or cookie store. Those are fixed browser-side policies. `follow_redirects` is opt-in to the extension-controlled loop, not permission to follow unchecked redirects. The extension's `redirectsEnabled` setting is false by default, is writable only by extension UI, and is not a protocol request field.
+Clients cannot choose credentials, raw Fetch redirect mode, or browser profile. Background cookie selection is fixed; tab requests use the selected document's cookie context. `follow_redirects` is opt-in to the extension-controlled loop, not permission to follow unchecked redirects. The extension's `redirectsEnabled` setting is false by default, is writable only by extension UI, and is not a protocol request field.
+
+### Tab-Context Requests
+
+Tab execution is an additive protocol-v1 feature with **distinct message types** so an older host cannot strip tab options and accidentally execute a mutation in the background:
+
+```json
+{
+  "protocol": "browser-proxy",
+  "version": 1,
+  "type": "request_tab_stream",
+  "id": "tab-example",
+  "request": {
+    "url": "https://api.example.com/action",
+    "method": "POST",
+    "headers": [["Content-Type", "application/json"]],
+    "body": {"encoding": "base64", "data": "e30="},
+    "tab": {"profile": "work-app", "existing_only": true}
+  }
+}
+```
+
+`tab` fields (all optional; `{}` enables automatic selection):
+
+| Field | Meaning |
+| --- | --- |
+| `url` | Absolute HTTP(S), credential-free application/bootstrap URL; maximum 16384 characters |
+| `id` | Nonnegative safe-integer browser tab ID; selects this existing tab without navigation |
+| `profile` | Saved profile name, 1–64 ASCII letters/digits/dots/underscores/hyphens; must match the exact initial API origin |
+| `existing_only` | Boolean, default false; prohibit helper creation |
+| `csrf` | Boolean, default true; enable the selected profile's CSRF rules |
+
+Unknown tab fields are rejected. No inline profile, arbitrary JavaScript, cookie value, allowlist, or settings-update operation is accepted. Profiles are selected and normalized in the browser from extension-UI-owned `tabProfiles` storage. The [user guide](user-guide.md#tab-context-requests) specifies the profile format and selection heuristic. Both application and requested API/bootstrap origins must match the current allowlist. Explicit tab IDs can select an accessible container/private document; automatic selection excludes private/discarded tabs. Helper creation requires an existing regular window, uses `active: false`, and does not focus that window.
+
+API requests, uploads, HTTP status handling, redirect opt-in, metadata sanitization, buffered limits, and streaming acknowledgements use the existing protocols. Tab selection/loading, readiness, CSRF acquisition, and transfer all share `timeout_ms`. Closing/navigating the document interrupts the request. Tab and CSRF errors never trigger a context fallback or automatic mutation retry.
+
+Cookie/DOM/bootstrap-derived tokens remain inside browser-side processing. They are not sent to the native host, stored in redirect history, or included in diagnostics. Header/form/JSON targets are applied to a fresh copy of each hop, only on the configured exact API origin and methods; derived values are not carried across origins. Caller-supplied values at configured targets are replaced. Form/JSON rewriting stays within the 16 MiB upload limit. A profile change mid-request fails with `TAB_CONFIG_CHANGED`; allowlists are reread before each Fetch, including bootstrap GETs and final issuance in the content script.
+
+Bootstrap GETs use include credentials, no-store cache, and manual redirects. They require a direct 2xx response; redirect bodies are never read, and redirect targets are never contacted for token acquisition. JSON is limited to 64 KiB and tokens to 4096 characters. Tab Fetch uses the application document's context with `strict-origin-when-cross-origin`, subject to normal page CORS. Service-worker-controlled documents are rejected because their workers can replace manual requests with unchecked network operations. Normal page loading/subresources are ordinary browsing, not proxied requests; execution after navigation requires the expected application origin.
+
+An unexpected application-page origin returns `TAB_ORIGIN_MISMATCH` before injection, token acquisition, or API Fetch, even if an allowlist wildcard covers both origins. This also applies to an explicitly selected tab with a different origin. `follow_redirects` does not change this setup check. The error includes `expected_origin` and `actual_origin` (HTTP(S) origins, or null if unavailable) and boolean `actual_origin_allowed`, based on a fresh allowlist read. Messages report origins rather than page paths/queries/fragments and suggest using the final application/endpoint URL. `actual_origin_allowed` is diagnostic, not authorization to adopt another context. This replaces older builds' generic `TAB_INTERACTION_REQUIRED` for navigation-origin mismatches within v1; existing error framing is retained.
+
+An older host rejects `request_tab`/`request_tab_stream`. The current host sends `tab_request_start` to the extension; an older extension ignores that start and may time out without issuing a Fetch. The host rejects `tab` in legacy request envelopes, and the extension rejects it in `request_start`. Upgrade all components together. Existing background clients and framing remain compatible; tests cover both tab response modes and the native/local type distinction.
 
 ### Unfollowed Redirect Responses
 
@@ -102,7 +145,7 @@ These optional fields work with both `request` and `request_stream`. `follow_red
 
 Each hop uses `credentials: "include"`, `redirect: "manual"`, and the requested cache mode. Before issuing each hop, including same-origin hops, the extension rereads the stored allowlist and (for subsequent hops) checks that redirects remain enabled. Disallowed redirect destinations produce `REDIRECT_NOT_ALLOWED` before being requested. The initial URL still produces `ORIGIN_NOT_ALLOWED` if disallowed. One `timeout_ms` deadline covers the complete chain, metadata observation, body transfer, and streaming acknowledgements.
 
-Only 301/302/303/307/308 redirects are followed. 301/302 convert POST to GET; 303 converts methods other than GET/HEAD to GET. Method conversion removes the body and Content-Encoding, Content-Language, Content-Location, and Content-Type. 307/308 preserve the body bytes and method. Authorization is removed when the origin changes; other caller headers are retained subject to normal Fetch restrictions. Each request uses a no-referrer policy. The browser manages cookies separately for every hop. Relative targets are resolved against the current URL; targets must remain HTTP(S), credential-free, and at most 16384 characters.
+Only 301/302/303/307/308 redirects are followed. 301/302 convert POST to GET; 303 converts methods other than GET/HEAD to GET. Method conversion removes the body and Content-Encoding, Content-Language, Content-Location, and Content-Type. 307/308 preserve the original caller body bytes and method; tab CSRF rules are reapplied to each applicable hop. Authorization is removed when the origin changes; other caller headers are retained subject to normal Fetch restrictions. Background requests use a no-referrer policy. Tab requests use the application document with strict-origin-when-cross-origin, never a previous redirect URL. The browser manages cookies separately for every hop. Relative targets are resolved against the current URL; targets must remain HTTP(S), credential-free, and at most 16384 characters.
 
 The hop limit counts followed redirects, with at most 21 physical requests for the default limit of 20. A repeated URL alone does not terminate the chain because cookies can change between hops. A zero limit rejects the first redirect when following is requested and enabled. Redirect bodies are never read or streamed. Non-redirect 3xx responses (such as 300/304 or a readable 302 without Location) are returned normally regardless of the follow option. Normal readable responses omit `body_unavailable`.
 
@@ -181,14 +224,24 @@ Common codes:
 | `BROWSER_TIMEOUT` | host | Extension did not answer after its deadline |
 | `BROWSER_DISCONNECTED` | host | Native messaging port closed |
 | `PROTOCOL_ERROR` | host | Extension sent an invalid sequence |
+| `TAB_NOT_FOUND` / `TAB_NO_WINDOW` | extension | No eligible existing tab/window for the selected mode |
+| `TAB_ORIGIN_MISMATCH` | extension | Explicit tab or loaded application did not match its expected origin; includes origin-only details (older builds used `TAB_INTERACTION_REQUIRED` for navigation changes) |
+| `TAB_UNAVAILABLE` / `TAB_UNSUPPORTED` / `TAB_REQUEST_FAILED` | extension | Tab access, injection, page Fetch, or browser support failed |
+| `TAB_CLOSED` / `TAB_NAVIGATED` | extension | Document connection closed or its origin changed |
+| `TAB_SERVICE_WORKER` | extension | A controlling site service worker prevents enforcing the manual-hop policy |
+| `TAB_CONFIG_INVALID` / `TAB_CONFIG_CHANGED` | extension | Invalid/ambiguous profile or configuration changed during the request |
+| `TAB_PROTOCOL_ERROR` | extension | Invalid internal document-port sequence or message |
+| `CSRF_TOKEN_UNAVAILABLE` / `CSRF_TOKEN_INVALID` / `CSRF_SOURCE_AMBIGUOUS` | extension | Missing, excessive, invalid, or ambiguous token; no token contents in the error |
+| `CSRF_BODY_INVALID` / `CSRF_BODY_TOO_LARGE` / `CSRF_HEADERS_TOO_LARGE` | extension | Injection could not preserve body/header constraints |
+| `CSRF_BOOTSTRAP_FAILED` / `CSRF_BOOTSTRAP_TOO_LARGE` | extension | Bootstrap was unsuccessful, redirected, invalid JSON, or exceeded 64 KiB |
 
 New error codes may be added without a protocol version change. Clients should display unknown codes rather than treating them as success.
 
-Observer-generated `REDIRECT_UNINSPECTABLE` errors may include boolean `request_observed`, `response_headers_observed`, `redirect_observed`, and `metadata_invalid` details to distinguish absent browser events from rejected metadata. `extension_events_observed` reports whether any extension-initiated webRequest events arrived during the Fetch, including other concurrent requests; it does not authorize correlation. When no request event was bound, `web_request_permission` and `host_permission` may also report the existing browser grants. These diagnostics contain no request URLs or response headers and do not request permissions.
+Observer-generated `REDIRECT_UNINSPECTABLE` errors may include boolean `request_observed`, `response_headers_observed`, `redirect_observed`, and `metadata_invalid` details to distinguish absent browser events from rejected metadata. `extension_events_observed` reports whether any events from the observer's owning context arrived during the Fetch (extension initiator for background mode, selected document for tab mode), including other concurrent requests; it does not authorize correlation. When no request event was bound, `web_request_permission` and `host_permission` may also report the existing browser grants. These diagnostics contain no request URLs or response headers and do not request permissions.
 
 ## Streaming Response Mode
 
-Send the same request envelope and fields as above, with **`"type": "request_stream"`**. Upload bodies remain base64 encoded and limited to 16 MiB. All stream frames use the common protocol/version/id envelope. Streaming is an additive version 1 feature: original `request` clients retain their single-frame responses and 32 MiB response cap. An older host rejects `request_stream`; clients must not silently fall back to buffering. The new host also rejects a buffered native response to a streaming request, prompting an extension reload.
+Send the same request envelope and fields as above, with **`"type": "request_stream"`** (or **`"type": "request_tab_stream"`** and a `tab` object). Upload bodies remain base64 encoded and limited to 16 MiB. All stream frames use the common protocol/version/id envelope. Streaming is an additive version 1 feature: original `request` clients retain their single-frame responses and 32 MiB response cap. An older host rejects unsupported types; clients must not silently fall back to buffering or background execution. The new host also rejects a buffered native response to a streaming request, prompting an extension reload.
 
 The successful exchange is:
 
@@ -227,6 +280,8 @@ request_chunk { sequence: 0, data: base64 }  repeated
 request_end   { chunks: N }
 ```
 
+Tab requests replace **only** the initial type with `tab_request_start` and include the validated `tab` object in request metadata. Upload chunks/end, cancellations, and responses retain their existing types. This start-type distinction prevents an older extension from treating tab requests as background requests. Local-only settings fields are not forwarded by the native host.
+
 Buffered success sequence:
 
 ```text
@@ -235,7 +290,7 @@ response_chunk { sequence: 0, data: base64 } repeated
 response_end   { chunks: N }
 ```
 
-For a streaming request, the host adds `stream_response: true` to `request_start`. The extension uses the same response_start/chunk/end fields and acknowledgement sequence described in [Streaming Response Mode](#streaming-response-mode). Native `response_ack` messages carry the request ID and sequence, including `-1` for start. Native `request_cancel` carries only the request ID in addition to the common envelope. The extension validates controls against the current port and active request. An invalid acknowledgement aborts that request.
+For a streaming request, the host adds `stream_response: true` to `request_start` or `tab_request_start`. The extension uses the same response_start/chunk/end fields and acknowledgement sequence described in [Streaming Response Mode](#streaming-response-mode). Native `response_ack` messages carry the request ID and sequence, including `-1` for start. Native `request_cancel` carries only the request ID in addition to the common envelope. The extension validates controls against the current port and active request. An invalid acknowledgement aborts that request.
 
 An error is one `response_error` message with an `error` object. Sequence numbers start at zero and must be contiguous. Declared byte and chunk counts must match. Custom local applications should implement only the local socket protocol.
 

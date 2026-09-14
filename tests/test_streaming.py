@@ -54,6 +54,25 @@ class CountingOutput:
 
 
 class StreamingIntegrationTests(unittest.TestCase):
+    def test_real_tab_stream_uses_document_context_envelope_and_existing_ack_protocol(self):
+        def browser():
+            start = self.read_native()
+            self.assertEqual(start["type"], "tab_request_start")
+            self.assertEqual(start["request"]["tab"], {"profile": "app", "existing_only": True})
+            self.assertTrue(start["stream_response"])
+            self.assertEqual(self.read_native()["type"], "request_end")
+            self.send_native(response_start(start["id"]))
+            self.expect_ack(start["id"], -1)
+            self.send_native(envelope("response_chunk", start["id"], sequence=0, data="AP+AAQ=="))
+            self.expect_ack(start["id"], 0)
+            self.send_native(envelope("response_end", start["id"], chunks=1, body_bytes=4))
+
+        driver = self.start_driver(browser)
+        output = io.BytesIO()
+        self.assertEqual(self.run_cli(output, "--tab-profile", "app", "--tab-existing-only"), (0, ""))
+        self.assertEqual(output.getvalue(), bytes([0, 255, 128, 1]))
+        self.finish_driver(driver)
+
     def setUp(self):
         runtime = Path(__file__).resolve().parents[1] / ".browser-proxy"
         runtime.mkdir(exist_ok=True)

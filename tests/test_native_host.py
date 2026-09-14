@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import os
 import socket
 import subprocess
@@ -11,6 +12,8 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from browser_proxy.native_host import NativeHost, detect_browser
 from browser_proxy.protocol import (
@@ -18,6 +21,7 @@ from browser_proxy.protocol import (
     NATIVE_LENGTH,
     PROTOCOL_NAME,
     PROTOCOL_VERSION,
+    ProtocolError,
     exchange_local,
     read_framed,
     write_framed,
@@ -25,6 +29,26 @@ from browser_proxy.protocol import (
 
 
 class NativeHostTests(unittest.TestCase):
+    def test_tab_envelopes_are_not_silently_downgraded_and_metadata_is_preserved(self) -> None:
+        host = NativeHost("chrome", Path("unused.sock"))
+        for kind in ("request_tab", "request_tab_stream"):
+            request = {"url": "https://example.com/api", "tab": {"profile": "app", "existing_only": True},
+                       "tabProfiles": {"profiles": []}, "allowlist": ["*://*"]}
+            envelope = {"protocol": PROTOCOL_NAME, "version": 1, "type": kind, "id": "tab", "request": request}
+            _, decoded, body, _ = host.decode_request(envelope)
+            output = io.BytesIO()
+            with patch("sys.stdout", SimpleNamespace(buffer=output)):
+                host.send_request("tab", decoded, body, kind.endswith("_stream"))
+            output.seek(0)
+            start = read_framed(output, NATIVE_LENGTH, MAX_LOCAL_MESSAGE_BYTES)
+            self.assertEqual(start["type"], "tab_request_start")
+            self.assertEqual(start["request"], {"url": request["url"], "tab": request["tab"]})
+            self.assertEqual(start.get("stream_response", False), kind.endswith("_stream"))
+            self.assertEqual(read_framed(output, NATIVE_LENGTH, MAX_LOCAL_MESSAGE_BYTES)["type"], "request_end")
+            for changed in ({"type": "request"}, {"request": {"url": request["url"]}}):
+                with self.assertRaises(ProtocolError):
+                    host.decode_request({**envelope, **changed})
+
     def test_detects_browser_arguments(self) -> None:
         self.assertEqual(detect_browser(["chrome-extension://abc/"]), "chrome")
         self.assertEqual(detect_browser(["manifest.json", "browser-proxy@local.invalid"]), "firefox")

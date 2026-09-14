@@ -9,6 +9,21 @@ const importFileInput = document.querySelector("#import-file");
 const reconnectButton = document.querySelector("#reconnect");
 const redirectsInput = document.querySelector("#redirects-enabled");
 const redirectsMessage = document.querySelector("#redirects-message");
+const tabProfilesFile = document.querySelector("#tab-profiles-file");
+const tabProfilesMessage = document.querySelector("#tab-profiles-message");
+const tabProfileControls = document.querySelector("#tab-profile-controls");
+const addTabProfile = document.querySelector("#add-tab-profile");
+let profilesBusy = false;
+const profileEditor = BrowserProxyProfileEditor.create(document.querySelector("#tab-profiles"), () => {
+  updateProfileCount();
+  tabProfilesMessage.textContent = "Unsaved changes. Click Save profiles to apply them.";
+  tabProfilesMessage.className = "message";
+});
+
+function updateProfileCount() {
+  document.querySelector("#tab-profile-count").textContent = `${profileEditor.count} ${profileEditor.count === 1 ? "profile" : "profiles"}`;
+  addTabProfile.disabled = profileEditor.count >= 64;
+}
 
 function rulesFromInput() {
   return allowlistInput.value
@@ -47,9 +62,16 @@ async function updateStatus() {
 }
 
 async function load() {
-  const { allowlist, redirectsEnabled } = await optionsApi.storage.local.get({ allowlist: [], redirectsEnabled: false });
+  const { allowlist, redirectsEnabled, tabProfiles } = await optionsApi.storage.local.get({
+    allowlist: [], redirectsEnabled: false, tabProfiles: { version: 1, profiles: [] },
+  });
   allowlistInput.value = allowlist.join("\n");
   redirectsInput.checked = redirectsEnabled === true;
+  try {
+    profileEditor.load(tabProfiles);
+    updateProfileCount();
+  } catch (error) { profileError(error, "load"); }
+  tabProfileControls.disabled = false;
   updateCount();
   await updateStatus();
 }
@@ -109,6 +131,62 @@ async function exportAllowlist() {
 }
 
 document.querySelector("#save").addEventListener("click", save);
+async function saveTabProfiles(tabProfiles, imported = false) {
+  if (profilesBusy) return;
+  profilesBusy = true;
+  tabProfileControls.disabled = true;
+  try {
+    const normalized = BrowserProxyTabSettings.normalize(await tabProfiles);
+    await optionsApi.storage.local.set({ tabProfiles: normalized });
+    if (imported) profileEditor.load(normalized);
+    updateProfileCount();
+    tabProfilesMessage.textContent = `${imported ? "Imported and saved" : "Saved"} ${normalized.profiles.length} tab profiles.`;
+    tabProfilesMessage.className = "message success";
+  } finally {
+    profilesBusy = false;
+    tabProfileControls.disabled = false;
+  }
+}
+
+function profileError(error, action = "save") {
+  tabProfilesMessage.textContent = `Could not ${action} profiles: ${error.message}`;
+  tabProfilesMessage.className = "message error";
+}
+
+addTabProfile.addEventListener("click", () => profileEditor.add());
+document.querySelector("#tab-profiles-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (profilesBusy) return;
+  try { await saveTabProfiles(profileEditor.read()); }
+  catch (error) { profileError(error); }
+});
+document.querySelector("#import-tab-profiles").addEventListener("click", () => tabProfilesFile.click());
+tabProfilesFile.addEventListener("change", async () => {
+  const [file] = tabProfilesFile.files;
+  tabProfilesFile.value = "";
+  if (!file || profilesBusy) return;
+  try {
+    if (file.size > BrowserProxyTabSettings.maxConfigBytes) throw new Error("Profiles exceed 64 KiB");
+    // Lock the form while reading too, so typing during import cannot be lost.
+    await saveTabProfiles(file.text().then(contents => JSON.parse(contents)), true);
+  } catch (error) { profileError(error, "import"); }
+});
+document.querySelector("#export-tab-profiles").addEventListener("click", async () => {
+  try {
+    const { tabProfiles } = await optionsApi.storage.local.get({ tabProfiles: { version: 1, profiles: [] } });
+    const data = JSON.stringify(BrowserProxyTabSettings.normalize(tabProfiles), null, 2) + "\n";
+    const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "browser-proxy-tab-profiles.json";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    tabProfilesMessage.textContent = "Exported saved profiles (configuration only).";
+    tabProfilesMessage.className = "message success";
+  } catch (error) { profileError(error, "export"); }
+});
 redirectsInput.addEventListener("change", async () => {
   redirectsInput.disabled = true;
   try {

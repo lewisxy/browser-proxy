@@ -5,6 +5,7 @@
   "description": "Development and browser-test tooling for Browser Proxy",
   "scripts": {
     "build:extensions": ".venv/bin/python tools/build_extension.py",
+    "package:extensions": ".venv/bin/python tools/build_extension.py --package",
     "lint:firefox": "npx --yes web-ext@10.6.0 lint --source-dir dist/firefox",
     "test": "npm run test:python && npm run test:javascript",
     "test:python": ".venv/bin/python -m unittest discover -s tests -v",
